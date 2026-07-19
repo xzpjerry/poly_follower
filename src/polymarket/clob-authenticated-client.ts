@@ -41,6 +41,7 @@ export interface AuthenticatedAccountStatus {
   signerAddress: string;
   funderAddress: string;
   profileMappedProxyAddress: string;
+  signatureType: SignatureTypeV2;
   credentialSource: "file" | "derived-in-memory";
   closedOnly: boolean;
   collateralBalanceUsd: string;
@@ -103,12 +104,14 @@ export class AuthenticatedClobClient {
     public readonly signerAddress: string,
     public readonly funderAddress: string,
     public readonly profileMappedProxyAddress: string,
+    public readonly signatureType: SignatureTypeV2,
     public readonly credentialSource: "file" | "derived-in-memory",
   ) {}
 
   public static async connect(
     credentials: TradingCredentials,
     followerProfileWallet: string,
+    signatureType: SignatureTypeV2,
     logger: Logger,
   ): Promise<AuthenticatedClobClient> {
     const account = privateKeyToAccount(credentials.privateKey);
@@ -148,7 +151,7 @@ export class AuthenticatedClobClient {
       chain: Chain.POLYGON,
       signer,
       creds: apiCredentials,
-      signatureType: SignatureTypeV2.POLY_PROXY,
+      signatureType,
       funderAddress: followerProfileWallet,
       useServerTime: true,
       retryOnError: false,
@@ -160,6 +163,7 @@ export class AuthenticatedClobClient {
       account.address.toLowerCase(),
       followerProfileWallet.toLowerCase(),
       profileMappedProxyAddress.toLowerCase(),
+      signatureType,
       credentialSource,
     );
 
@@ -167,6 +171,10 @@ export class AuthenticatedClobClient {
   }
 
   public async getAccountStatus(): Promise<AuthenticatedAccountStatus> {
+    // The CLOB balance endpoint serves a cache. Refresh it before reporting
+    // account readiness so a newly funded or migrated pUSD balance is not
+    // mistaken for zero. This endpoint does not submit an onchain transaction.
+    await this.client.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const [banStatus, collateral] = await Promise.all([
       this.client.getClosedOnlyMode(),
       this.client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }),
@@ -175,6 +183,7 @@ export class AuthenticatedClobClient {
       signerAddress: this.signerAddress,
       funderAddress: this.funderAddress,
       profileMappedProxyAddress: this.profileMappedProxyAddress,
+      signatureType: this.signatureType,
       credentialSource: this.credentialSource,
       closedOnly: banStatus.closed_only,
       collateralBalanceUsd: availableBaseUnits(collateral).div(TOKEN_DECIMALS).toFixed(6),

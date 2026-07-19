@@ -8,6 +8,12 @@ import YAML from "yaml";
 import { z } from "zod";
 
 const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
+const signatureTypeSchema = z.union([
+  z.literal(0),
+  z.literal(1),
+  z.literal(2),
+  z.literal(3),
+]);
 
 const configSchema = z
   .object({
@@ -35,7 +41,7 @@ const configSchema = z
     }),
     execution: z.object({
       mode: z.enum(["dry-run", "authenticated-readonly", "live"]),
-      signature_type: z.literal(1).default(1),
+      signature_type: signatureTypeSchema.default(3),
       max_orders_per_cycle: z.literal(1).default(1),
       max_signal_age_seconds: z.number().int().min(0).default(30),
       max_price_drift_abs: z.string().default("0.02"),
@@ -111,7 +117,7 @@ export interface AppConfig {
   };
   execution: {
     mode: "dry-run" | "authenticated-readonly" | "live";
-    signatureType: 1;
+    signatureType: 0 | 1 | 2 | 3;
     maxOrdersPerCycle: 1;
     maxSignalAgeSeconds: number;
     maxPriceDriftAbs: string;

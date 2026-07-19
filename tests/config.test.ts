@@ -16,7 +16,7 @@ afterEach(() => {
   }
 });
 
-function writeConfig(mode: string, follower: string | null): string {
+function writeConfig(mode: string, follower: string | null, signatureType = 3): string {
   const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-config-"));
   temporaryDirectories.push(directory);
   const filePath = path.join(directory, "runtime.yaml");
@@ -38,7 +38,7 @@ risk:
 monitoring: {}
 execution:
   mode: "${mode}"
-  signature_type: 1
+  signature_type: ${signatureType}
   max_orders_per_cycle: 1
 state:
   database_path: "data/state.sqlite"
@@ -60,9 +60,13 @@ describe("live configuration gates", () => {
   it("accepts live mode only when the event confirmation matches", async () => {
     process.env.POLYMARKET_LIVE_TRADING_EVENT = "event-slug";
     await expect(loadConfig(writeConfig("live", follower))).resolves.toMatchObject({
-      execution: { mode: "live", signatureType: 1, maxOrdersPerCycle: 1 },
+      execution: { mode: "live", signatureType: 3, maxOrdersPerCycle: 1 },
       followerProfileWallet: follower,
     });
+  });
+
+  it("rejects unsupported CLOB signature types", async () => {
+    await expect(loadConfig(writeConfig("authenticated-readonly", follower, 4))).rejects.toThrow();
   });
 
   it("rejects authenticated mode without a follower wallet", async () => {

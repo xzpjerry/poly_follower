@@ -23,8 +23,8 @@ monitoring:
 
 execution:
   mode: "dry-run"
-  # Existing Google/Magic Link proxy wallet accounts use POLY_PROXY=1.
-  signature_type: 1
+  # Set this to the wallet's verified CLOB type: EOA=0, Proxy=1, Safe=2, Deposit/POLY_1271=3.
+  signature_type: 3
   # Live mode intentionally executes at most one FOK order, then reconciles again.
   max_orders_per_cycle: 1
   max_signal_age_seconds: 30

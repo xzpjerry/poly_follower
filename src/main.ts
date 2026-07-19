@@ -46,6 +46,7 @@ async function main(): Promise<void> {
     authenticatedClob = await AuthenticatedClobClient.connect(
       credentials,
       config.followerProfileWallet,
+      config.execution.signatureType,
       logger,
     );
     const accountStatus = await authenticatedClob.getAccountStatus();
