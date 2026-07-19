@@ -59,8 +59,8 @@ describe("live configuration gates", () => {
   const follower = "0x2222222222222222222222222222222222222222";
 
   beforeEach(() => {
-    process.env.PUSHOVER_APP_TOKEN_FILE = "/run/secrets/pushover_app_token";
-    process.env.PUSHOVER_USER_KEY_FILE = "/run/secrets/pushover_user_key";
+    process.env.PUSHOVER_APP_TOKEN_FILE = "/run/secrets/pushover_push_key";
+    process.env.PUSHOVER_USER_KEY_FILE = "/run/secrets/pushover_push_user";
   });
 
   it("requires an exact event-slug confirmation for live mode", async () => {
