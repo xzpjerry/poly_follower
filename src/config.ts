@@ -7,6 +7,8 @@ import { Decimal } from "decimal.js";
 import YAML from "yaml";
 import { z } from "zod";
 
+import type { EventDateSelector } from "./domain/event-selector.js";
+
 const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
 const signatureTypeSchema = z.union([
   z.literal(0),
@@ -14,17 +16,63 @@ const signatureTypeSchema = z.union([
   z.literal(2),
   z.literal(3),
 ]);
+const explicitDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year ?? 0, (month ?? 0) - 1, day));
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === (month ?? 0) - 1 &&
+    parsed.getUTCDate() === day
+  );
+}, "event_date must be a real calendar date");
+const eventDateSchema = z.union([z.literal("today"), z.literal("tomorrow"), explicitDateSchema]);
+const timeZoneSchema = z.string().min(1).refine((value) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}, "timezone must be a valid IANA time zone");
 
 const configSchema = z
   .object({
     leader_profile_wallet: addressSchema,
     follower_profile_wallet: addressSchema.nullable().optional(),
     simulate_empty_follower: z.boolean().default(false),
-    scope: z.object({
-      event_slug: z.string().min(1),
-      include_yes_tokens: z.boolean().default(true),
-      include_no_tokens: z.boolean().default(true),
-    }),
+    scope: z
+      .object({
+        event_slug: z.string().min(1).nullable().optional(),
+        series_slug: z.string().min(1).nullable().optional(),
+        event_date: eventDateSchema.optional(),
+        timezone: timeZoneSchema.default("Asia/Hong_Kong"),
+        include_yes_tokens: z.boolean().default(true),
+        include_no_tokens: z.boolean().default(true),
+      })
+      .superRefine((scope, context) => {
+        const selectorCount = Number(Boolean(scope.event_slug)) + Number(Boolean(scope.series_slug));
+        if (selectorCount !== 1) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["event_slug"],
+            message: "Configure exactly one of scope.event_slug or scope.series_slug",
+          });
+        }
+        if (scope.series_slug && !scope.event_date) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["event_date"],
+            message: "scope.event_date is required with scope.series_slug",
+          });
+        }
+        if (scope.event_slug && scope.event_date) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["event_date"],
+            message: "scope.event_date is only valid with scope.series_slug",
+          });
+        }
+      }),
     copy: z.object({
       share_ratio: z.string(),
       sync_existing_positions_on_start: z.literal(true).default(true),
@@ -97,7 +145,10 @@ export interface AppConfig {
   followerProfileWallet: string | null;
   simulateEmptyFollower: boolean;
   scope: {
-    eventSlug: string;
+    eventSlug: string | null;
+    seriesSlug: string | null;
+    eventDate: EventDateSelector | null;
+    timeZone: string;
     includeYesTokens: boolean;
     includeNoTokens: boolean;
   };
@@ -175,11 +226,20 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   }
 
   if (parsed.execution.mode === "live") {
-    const confirmedEvent = process.env.POLYMARKET_LIVE_TRADING_EVENT?.trim();
-    if (confirmedEvent !== parsed.scope.event_slug) {
-      throw new Error(
-        "Live execution requires POLYMARKET_LIVE_TRADING_EVENT to exactly match scope.event_slug",
-      );
+    if (parsed.scope.event_slug) {
+      const confirmedEvent = process.env.POLYMARKET_LIVE_TRADING_EVENT?.trim();
+      if (confirmedEvent !== parsed.scope.event_slug) {
+        throw new Error(
+          "Live execution requires POLYMARKET_LIVE_TRADING_EVENT to exactly match scope.event_slug",
+        );
+      }
+    } else {
+      const confirmedSeries = process.env.POLYMARKET_LIVE_TRADING_SERIES?.trim();
+      if (confirmedSeries !== parsed.scope.series_slug) {
+        throw new Error(
+          "Live execution requires POLYMARKET_LIVE_TRADING_SERIES to exactly match scope.series_slug",
+        );
+      }
     }
   }
 
@@ -188,7 +248,10 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     followerProfileWallet: followerProfileWallet?.toLowerCase() ?? null,
     simulateEmptyFollower: parsed.simulate_empty_follower,
     scope: {
-      eventSlug: parsed.scope.event_slug,
+      eventSlug: parsed.scope.event_slug ?? null,
+      seriesSlug: parsed.scope.series_slug ?? null,
+      eventDate: (parsed.scope.event_date as EventDateSelector | undefined) ?? null,
+      timeZone: parsed.scope.timezone,
       includeYesTokens: parsed.scope.include_yes_tokens,
       includeNoTokens: parsed.scope.include_no_tokens,
     },

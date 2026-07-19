@@ -4,6 +4,7 @@ import { Decimal } from "decimal.js";
 import type { Logger } from "pino";
 
 import type { AppConfig } from "../config.js";
+import { resolveEventDate } from "../domain/event-selector.js";
 import { buildReconciliationPlan } from "../domain/target-position.js";
 import { compareLedgerToPublicPositions, reconstructEventLedger } from "../domain/trade-ledger.js";
 import type { DiscoveredEvent, OrderBook, ReconciliationPlan, UserPosition } from "../domain/types.js";
@@ -54,10 +55,24 @@ export class Reconciler {
   ) {}
 
   public async discover(): Promise<DiscoveredEvent> {
-    const event = await this.gamma.getEventBySlug(this.config.scope.eventSlug, {
+    const outcomeFilter = {
       includeYes: this.config.scope.includeYesTokens,
       includeNo: this.config.scope.includeNoTokens,
-    });
+    };
+    let event: DiscoveredEvent;
+    if (this.config.scope.eventSlug) {
+      event = await this.gamma.getEventBySlug(this.config.scope.eventSlug, outcomeFilter);
+    } else {
+      const { seriesSlug, eventDate, timeZone } = this.config.scope;
+      if (!seriesSlug || !eventDate) {
+        throw new Error("Validated Series discovery configuration is incomplete");
+      }
+      event = await this.gamma.getEventBySeriesDate(
+        seriesSlug,
+        resolveEventDate(eventDate, timeZone),
+        outcomeFilter,
+      );
+    }
     this.state.upsertEvent(event);
     return event;
   }

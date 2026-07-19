@@ -34,12 +34,29 @@ const eventSchema = z
     id: numberLike,
     slug: z.string().min(1),
     title: z.string().default(""),
+    eventDate: z.string().nullish().transform((value) => value ?? ""),
+    seriesSlug: z.string().nullish().transform((value) => value ?? ""),
     active: z.boolean().default(false),
     closed: z.boolean().default(false),
+    archived: z.boolean().nullish().transform((value) => value ?? false),
     endDate: z.string().default(""),
     markets: z.array(marketSchema),
   })
   .passthrough();
+const eventKeysetSchema = z.object({
+  events: z.array(eventSchema),
+  next_cursor: z.string().nullable().optional(),
+});
+const seriesSchema = z
+  .object({
+    id: numberLike,
+    slug: z.string().min(1),
+    title: z.string().nullish().transform((value) => value ?? ""),
+    recurrence: z.string().nullish().transform((value) => value ?? ""),
+  })
+  .passthrough();
+const seriesListSchema = z.array(seriesSchema);
+type GammaEvent = z.infer<typeof eventSchema>;
 
 function parseStringArray(value: string[] | string, fieldName: string): string[] {
   if (Array.isArray(value)) {
@@ -65,6 +82,8 @@ function normalizeFeeSchedule(
 }
 
 export class GammaClient {
+  private readonly seriesIds = new Map<string, string>();
+
   public constructor(private readonly http: JsonHttpClient) {}
 
   public async getEventBySlug(
@@ -78,6 +97,59 @@ export class GammaClient {
       throw new Error(`Gamma returned unexpected event slug ${event.slug}`);
     }
 
+    return this.expandEvent(event, outcomeFilter);
+  }
+
+  public async getEventBySeriesDate(
+    seriesSlug: string,
+    eventDate: string,
+    outcomeFilter: { includeYes: boolean; includeNo: boolean },
+  ): Promise<DiscoveredEvent> {
+    const seriesId = await this.getSeriesId(seriesSlug);
+    const raw = await this.http.get("/events/keyset", {
+      series_id: seriesId,
+      event_date: `${eventDate}T00:00:00Z`,
+      limit: 20,
+    });
+    const response = eventKeysetSchema.parse(raw);
+    const candidates = response.events.filter(
+      (event) => event.seriesSlug === seriesSlug && event.eventDate === eventDate,
+    );
+    if (candidates.length !== 1) {
+      throw new Error(
+        `Expected exactly one Gamma event for series ${seriesSlug} on ${eventDate}; found ${candidates.length}`,
+      );
+    }
+    const event = candidates[0];
+    if (!event) {
+      throw new Error(`Gamma event candidate disappeared for series ${seriesSlug} on ${eventDate}`);
+    }
+    return this.expandEvent(event, outcomeFilter);
+  }
+
+  private async getSeriesId(seriesSlug: string): Promise<string> {
+    const cached = this.seriesIds.get(seriesSlug);
+    if (cached) {
+      return cached;
+    }
+    const raw = await this.http.get("/series", { slug: seriesSlug });
+    const matches = seriesListSchema.parse(raw).filter((series) => series.slug === seriesSlug);
+    if (matches.length !== 1) {
+      throw new Error(`Expected exactly one Gamma series for slug ${seriesSlug}; found ${matches.length}`);
+    }
+    const series = matches[0];
+    if (!series) {
+      throw new Error(`Gamma series candidate disappeared for slug ${seriesSlug}`);
+    }
+    const seriesId = String(series.id);
+    this.seriesIds.set(seriesSlug, seriesId);
+    return seriesId;
+  }
+
+  private expandEvent(
+    event: GammaEvent,
+    outcomeFilter: { includeYes: boolean; includeNo: boolean },
+  ): DiscoveredEvent {
     const eventId = String(event.id);
     const assets: TrackedAsset[] = [];
 
@@ -122,7 +194,7 @@ export class GammaClient {
     }
 
     if (assets.length === 0) {
-      throw new Error(`Event ${eventSlug} has no tracked outcome assets`);
+      throw new Error(`Event ${event.slug} has no tracked outcome assets`);
     }
 
     return {
@@ -133,7 +205,7 @@ export class GammaClient {
       closed: event.closed,
       endDate: event.endDate,
       assets,
-      raw,
+      raw: event,
     };
   }
 }

@@ -1,12 +1,12 @@
 # Polymarket Weather Follower
 
-Event-scoped Polymarket weather copy-trading service. It discovers one Gamma Event, reads leader/follower positions, builds a fee-aware target allocation under a hard event cap, and reconciles that target without replaying historical buys.
+Event-scoped Polymarket weather copy-trading service. It discovers one exact Gamma Event or resolves a recurring Series plus calendar date to one Event, reads leader/follower positions, builds a fee-aware target allocation under a hard event cap, and reconciles that target without replaying historical buys.
 
 ## Safety status
 
 - `dry-run` remains the default.
 - `authenticated-readonly` verifies the signer/proxy relationship, derives or loads CLOB L2 credentials in memory, and reconciles authenticated open orders and trades without posting orders.
-- `live` is guarded by an exact event-slug environment confirmation, authenticated ledger agreement, balance/allowance preflight, one FOK order per cycle, and fail-closed ambiguous-attempt recovery.
+- `live` is guarded by an exact Event or Series environment confirmation, authenticated ledger agreement, balance/allowance preflight, one FOK order per cycle, and fail-closed ambiguous-attempt recovery.
 - Runtime wallets and event slugs belong in ignored `config/runtime.yaml` or environment variables.
 - Private keys and CLOB credentials are accepted only through `*_FILE` paths. Never commit or inject their values as plaintext environment variables.
 
@@ -21,6 +21,19 @@ docker compose run --rm follower
 ```
 
 The Docker build runs TypeScript type checking, unit tests, and production compilation. Persistent dry-run state is stored under the ignored `data/` directory.
+
+## Event selection
+
+For recurring daily weather markets, prefer structured Series/date discovery over substring matching:
+
+```yaml
+scope:
+  series_slug: "shenzhen-daily-weather"
+  event_date: "today" # today, tomorrow, or YYYY-MM-DD
+  timezone: "Asia/Hong_Kong"
+```
+
+The service resolves the exact Series ID, queries Gamma by `series_id` and `event_date`, and proceeds only when exactly one Event has the expected `seriesSlug` and `eventDate`. Zero or multiple matches fail closed. To pin a single Event instead, configure only `scope.event_slug`. Dynamic live mode additionally requires `POLYMARKET_LIVE_TRADING_SERIES` to exactly equal the configured Series slug.
 
 ## Authenticated Ubuntu probe
 

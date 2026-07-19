@@ -3,7 +3,12 @@ follower_profile_wallet: null
 simulate_empty_follower: true
 
 scope:
-  event_slug: "replace-with-gamma-event-slug"
+  # Dynamic daily discovery: Series slug + today/tomorrow/YYYY-MM-DD.
+  series_slug: "replace-with-gamma-series-slug"
+  event_date: "today"
+  timezone: "Asia/Hong_Kong"
+  # Alternatively, remove the three fields above and pin one exact Event:
+  # event_slug: "replace-with-exact-gamma-event-slug"
   include_yes_tokens: true
   include_no_tokens: true
 

@@ -16,7 +16,12 @@ afterEach(() => {
   }
 });
 
-function writeConfig(mode: string, follower: string | null, signatureType = 3): string {
+function writeConfig(
+  mode: string,
+  follower: string | null,
+  signatureType = 3,
+  selector = '  event_slug: "event-slug"',
+): string {
   const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-config-"));
   temporaryDirectories.push(directory);
   const filePath = path.join(directory, "runtime.yaml");
@@ -26,7 +31,7 @@ function writeConfig(mode: string, follower: string | null, signatureType = 3): 
 follower_profile_wallet: ${follower === null ? "null" : `"${follower}"`}
 simulate_empty_follower: ${follower === null ? "true" : "false"}
 scope:
-  event_slug: "event-slug"
+${selector}
   include_yes_tokens: true
   include_no_tokens: true
 copy:
@@ -73,5 +78,37 @@ describe("live configuration gates", () => {
     await expect(loadConfig(writeConfig("authenticated-readonly", null))).rejects.toThrow(
       "require a follower profile wallet",
     );
+  });
+
+  it("accepts a unique Series and relative-date selector", async () => {
+    delete process.env.POLYMARKET_LIVE_TRADING_EVENT;
+    process.env.POLYMARKET_LIVE_TRADING_SERIES = "shenzhen-daily-weather";
+    const configPath = writeConfig(
+      "live",
+      follower,
+      3,
+      '  series_slug: "shenzhen-daily-weather"\n  event_date: "today"\n  timezone: "Asia/Hong_Kong"',
+    );
+    await expect(loadConfig(configPath)).resolves.toMatchObject({
+      scope: {
+        eventSlug: null,
+        seriesSlug: "shenzhen-daily-weather",
+        eventDate: "today",
+        timeZone: "Asia/Hong_Kong",
+      },
+    });
+  });
+
+  it("rejects a Series selector without an event date", async () => {
+    await expect(
+      loadConfig(
+        writeConfig(
+          "authenticated-readonly",
+          follower,
+          3,
+          '  series_slug: "shenzhen-daily-weather"',
+        ),
+      ),
+    ).rejects.toThrow("event_date");
   });
 });
