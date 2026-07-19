@@ -31,6 +31,7 @@ export class ClobPublicClient {
 
   public async getOrderBook(tokenId: string): Promise<OrderBook> {
     const raw = await this.http.get("/book", { token_id: tokenId });
+    const receivedAtMs = Date.now();
     const book = bookSchema.parse(raw);
     if (book.asset_id !== tokenId) {
       throw new Error(`CLOB returned order book for unexpected token ${book.asset_id}`);
@@ -39,7 +40,10 @@ export class ClobPublicClient {
     return {
       tokenId,
       market: book.market,
-      timestampMs: normalizeTimestamp(book.timestamp),
+      sourceTimestampMs: normalizeTimestamp(book.timestamp),
+      // A successful REST snapshot is fresh when received even if the CLOB's
+      // source timestamp reflects the last book mutation in a quiet market.
+      timestampMs: receivedAtMs,
       bids: book.bids
         .map((level) => ({ price: String(level.price), size: String(level.size) }))
         .sort((left, right) => Number(right.price) - Number(left.price)),

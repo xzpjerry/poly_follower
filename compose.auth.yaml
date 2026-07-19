@@ -1,0 +1,12 @@
+services:
+  follower:
+    environment:
+      POLYMARKET_PRIVATE_KEY_FILE: /run/secrets/polymarket_private_key
+    secrets:
+      - polymarket_private_key
+    # The systemd service runs continuously; use --once explicitly for probes.
+    command: ["--config", "/app/config/runtime.yaml"]
+
+secrets:
+  polymarket_private_key:
+    file: "${CREDENTIALS_DIRECTORY}/polymarket_private_key"

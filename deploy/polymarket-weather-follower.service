@@ -1,0 +1,21 @@
+[Unit]
+Description=Polymarket weather event follower
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=docker
+WorkingDirectory=/home/ubuntu/Polymarket_weather_following
+LoadCredentialEncrypted=polymarket_private_key:/etc/credstore.encrypted/polymarket-weather-follower/polymarket_private_key.cred
+ExecStart=/usr/bin/docker compose -f compose.yaml -f compose.auth.yaml up --abort-on-container-exit follower
+ExecStop=/usr/bin/docker compose -f compose.yaml -f compose.auth.yaml down --timeout 20
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

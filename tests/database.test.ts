@@ -57,4 +57,52 @@ describe("StateDatabase", () => {
     expect(state.observeLeaderPositions("event-123", wallet, ["token"], [])).toEqual(new Set(["token"]));
     state.close();
   });
+
+  it("replaces authenticated open-order snapshots authoritatively", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-"));
+    temporaryDirectories.push(directory);
+    const state = new StateDatabase(path.join(directory, "state.sqlite"));
+    state.replaceOpenOrders("event-123", [
+      {
+        orderId: "order-1",
+        tokenId: "token",
+        side: "BUY",
+        remainingShares: "5",
+        reservedDebit: "2",
+      },
+    ]);
+    expect(state.getOpenOrders("event-123")).toHaveLength(1);
+
+    state.replaceOpenOrders("event-123", []);
+    expect(state.getOpenOrders("event-123")).toEqual([]);
+    state.close();
+  });
+
+  it("updates reconstructed realized loss", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-"));
+    temporaryDirectories.push(directory);
+    const state = new StateDatabase(path.join(directory, "state.sqlite"));
+    state.setRealizedLoss("event-123", "0x1111111111111111111111111111111111111111", "1.25");
+    expect(state.getRealizedLoss("event-123", "0x1111111111111111111111111111111111111111")).toBe("1.25");
+    state.close();
+  });
+
+  it("keeps ambiguous execution attempts fail-closed until completed", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-"));
+    temporaryDirectories.push(directory);
+    const state = new StateDatabase(path.join(directory, "state.sqlite"));
+    state.beginExecutionAttempt({
+      attemptId: "attempt-1",
+      runId: "run-1",
+      eventId: "event-123",
+      tokenId: "token",
+      side: "BUY",
+      requestedShares: "5",
+      expectedDebit: "2",
+    });
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(true);
+    state.completeExecutionAttempt("attempt-1", "order-1", { status: "matched" });
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(false);
+    state.close();
+  });
 });

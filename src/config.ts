@@ -34,7 +34,9 @@ const configSchema = z
       request_timeout_ms: z.number().int().min(1000).default(10_000),
     }),
     execution: z.object({
-      mode: z.literal("dry-run"),
+      mode: z.enum(["dry-run", "authenticated-readonly", "live"]),
+      signature_type: z.literal(1).default(1),
+      max_orders_per_cycle: z.literal(1).default(1),
       max_signal_age_seconds: z.number().int().min(0).default(30),
       max_price_drift_abs: z.string().default("0.02"),
       max_slippage_bps: z.number().int().min(0).default(300),
@@ -108,7 +110,9 @@ export interface AppConfig {
     requestTimeoutMs: number;
   };
   execution: {
-    mode: "dry-run";
+    mode: "dry-run" | "authenticated-readonly" | "live";
+    signatureType: 1;
+    maxOrdersPerCycle: 1;
     maxSignalAgeSeconds: number;
     maxPriceDriftAbs: string;
     maxSlippageBps: number;
@@ -160,6 +164,19 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     throw new Error("FOLLOWER_PROFILE_WALLET is not a valid 0x-prefixed address");
   }
 
+  if (parsed.execution.mode !== "dry-run" && !followerProfileWallet) {
+    throw new Error("Authenticated modes require a follower profile wallet");
+  }
+
+  if (parsed.execution.mode === "live") {
+    const confirmedEvent = process.env.POLYMARKET_LIVE_TRADING_EVENT?.trim();
+    if (confirmedEvent !== parsed.scope.event_slug) {
+      throw new Error(
+        "Live execution requires POLYMARKET_LIVE_TRADING_EVENT to exactly match scope.event_slug",
+      );
+    }
+  }
+
   return {
     leaderProfileWallet: parsed.leader_profile_wallet.toLowerCase(),
     followerProfileWallet: followerProfileWallet?.toLowerCase() ?? null,
@@ -185,6 +202,8 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     },
     execution: {
       mode: parsed.execution.mode,
+      signatureType: parsed.execution.signature_type,
+      maxOrdersPerCycle: parsed.execution.max_orders_per_cycle,
       maxSignalAgeSeconds: parsed.execution.max_signal_age_seconds,
       maxPriceDriftAbs: parsed.execution.max_price_drift_abs,
       maxSlippageBps: parsed.execution.max_slippage_bps,

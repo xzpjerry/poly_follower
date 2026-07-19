@@ -167,6 +167,24 @@ export class StateDatabase {
         updated_at TEXT NOT NULL,
         PRIMARY KEY(event_id, leader_wallet, token_id)
       );
+
+      CREATE TABLE IF NOT EXISTS execution_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        requested_shares TEXT NOT NULL,
+        expected_debit TEXT NOT NULL,
+        state TEXT NOT NULL,
+        order_id TEXT,
+        response_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS execution_attempts_event_idx
+      ON execution_attempts(event_id, state, created_at);
     `);
   }
 
@@ -431,6 +449,111 @@ export class StateDatabase {
       )
       .get(eventId, followerWallet) as RiskRow | undefined;
     return row?.realized_loss ?? "0";
+  }
+
+  public setRealizedLoss(eventId: string, followerWallet: string, realizedLoss: string): void {
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO risk_ledger (
+           event_id, follower_wallet, open_cost_basis, reserved_buy_debit,
+           fees_paid, realized_pnl, realized_loss, updated_at
+         ) VALUES (?, ?, '0', '0', '0', '0', ?, ?)
+         ON CONFLICT(event_id, follower_wallet) DO UPDATE SET
+           realized_loss = excluded.realized_loss,
+           updated_at = excluded.updated_at`,
+      )
+      .run(eventId, followerWallet, realizedLoss, now);
+  }
+
+  public replaceOpenOrders(eventId: string, orders: PendingOrder[]): void {
+    const now = new Date().toISOString();
+    const transaction = this.database.transaction(() => {
+      this.database
+        .prepare(`UPDATE open_orders SET status = 'closed', updated_at = ? WHERE event_id = ?`)
+        .run(now, eventId);
+      const upsert = this.database.prepare(
+        `INSERT INTO open_orders (
+           order_id, event_id, token_id, side, remaining_shares,
+           reserved_debit, status, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 'live', ?)
+         ON CONFLICT(order_id) DO UPDATE SET
+           event_id = excluded.event_id,
+           token_id = excluded.token_id,
+           side = excluded.side,
+           remaining_shares = excluded.remaining_shares,
+           reserved_debit = excluded.reserved_debit,
+           status = 'live',
+           updated_at = excluded.updated_at`,
+      );
+      for (const order of orders) {
+        upsert.run(
+          order.orderId,
+          eventId,
+          order.tokenId,
+          order.side,
+          order.remainingShares,
+          order.reservedDebit,
+          now,
+        );
+      }
+    });
+    transaction();
+  }
+
+  public hasUnresolvedExecutionAttempt(eventId: string): boolean {
+    const row = this.database
+      .prepare(
+        `SELECT 1 AS present FROM execution_attempts
+         WHERE event_id = ? AND state = 'submitting'
+         LIMIT 1`,
+      )
+      .get(eventId) as { present: number } | undefined;
+    return row?.present === 1;
+  }
+
+  public beginExecutionAttempt(input: {
+    attemptId: string;
+    runId: string;
+    eventId: string;
+    tokenId: string;
+    side: "BUY" | "SELL";
+    requestedShares: string;
+    expectedDebit: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO execution_attempts (
+           attempt_id, run_id, event_id, token_id, side, requested_shares,
+           expected_debit, state, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'submitting', ?, ?)`,
+      )
+      .run(
+        input.attemptId,
+        input.runId,
+        input.eventId,
+        input.tokenId,
+        input.side,
+        input.requestedShares,
+        input.expectedDebit,
+        now,
+        now,
+      );
+  }
+
+  public completeExecutionAttempt(
+    attemptId: string,
+    orderId: string,
+    response: Record<string, unknown>,
+  ): void {
+    this.database
+      .prepare(
+        `UPDATE execution_attempts
+         SET state = 'succeeded', order_id = ?, response_json = ?, updated_at = ?
+         WHERE attempt_id = ? AND state = 'submitting'`,
+      )
+      .run(orderId, JSON.stringify(response), new Date().toISOString(), attemptId);
   }
 
   public getOpenOrders(eventId: string): PendingOrder[] {

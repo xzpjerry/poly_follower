@@ -23,6 +23,10 @@ monitoring:
 
 execution:
   mode: "dry-run"
+  # Existing Google/Magic Link proxy wallet accounts use POLY_PROXY=1.
+  signature_type: 1
+  # Live mode intentionally executes at most one FOK order, then reconciles again.
+  max_orders_per_cycle: 1
   max_signal_age_seconds: 30
   max_price_drift_abs: "0.02"
   max_slippage_bps: 300

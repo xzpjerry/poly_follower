@@ -1,10 +1,14 @@
+import { randomUUID } from "node:crypto";
+
 import { Decimal } from "decimal.js";
 import type { Logger } from "pino";
 
 import type { AppConfig } from "../config.js";
 import { buildReconciliationPlan } from "../domain/target-position.js";
+import { compareLedgerToPublicPositions, reconstructEventLedger } from "../domain/trade-ledger.js";
 import type { DiscoveredEvent, OrderBook, ReconciliationPlan, UserPosition } from "../domain/types.js";
 import { StateDatabase } from "../persistence/database.js";
+import { AuthenticatedClobClient } from "../polymarket/clob-authenticated-client.js";
 import { ClobPublicClient } from "../polymarket/clob-public-client.js";
 import { DataClient } from "../polymarket/data-client.js";
 import { GammaClient } from "../polymarket/gamma-client.js";
@@ -46,6 +50,7 @@ export class Reconciler {
     private readonly clob: ClobPublicClient,
     private readonly state: StateDatabase,
     private readonly logger: Logger,
+    private readonly authenticatedClob: AuthenticatedClobClient | null = null,
   ) {}
 
   public async discover(): Promise<DiscoveredEvent> {
@@ -66,6 +71,54 @@ export class Reconciler {
       : [];
     const leaderPositions = filterAllowedPositions(leaderPositionsRaw, event, "leader", this.logger);
     const followerPositions = filterAllowedPositions(followerPositionsRaw, event, "follower", this.logger);
+    let pendingOrders = this.state.getOpenOrders(event.eventId);
+    let realizedLoss = this.state.getRealizedLoss(
+      event.eventId,
+      this.config.followerProfileWallet ?? "simulated-empty-follower",
+    );
+    let authenticatedLedgerHealthy = this.authenticatedClob === null;
+    if (this.authenticatedClob) {
+      const [authenticatedOpenOrders, authenticatedTrades] = await Promise.all([
+        this.authenticatedClob.getOpenOrders(event),
+        this.authenticatedClob.getTrades(event),
+      ]);
+      this.state.replaceOpenOrders(event.eventId, authenticatedOpenOrders);
+      pendingOrders = authenticatedOpenOrders;
+      try {
+        const ledger = reconstructEventLedger(authenticatedTrades, event.assets);
+        const mismatches = compareLedgerToPublicPositions(
+          ledger,
+          followerPositions,
+          event.assets.map((asset) => asset.tokenId),
+        );
+        authenticatedLedgerHealthy = mismatches.length === 0;
+        if (authenticatedLedgerHealthy) {
+          realizedLoss = ledger.realizedLoss;
+          this.state.setRealizedLoss(event.eventId, this.authenticatedClob.funderAddress, realizedLoss);
+        } else {
+          this.logger.error(
+            { eventId: event.eventId, mismatchCount: mismatches.length, mismatches },
+            "Authenticated trade ledger disagrees with public follower positions; live execution is blocked",
+          );
+        }
+        this.logger.info(
+          {
+            eventId: event.eventId,
+            authenticatedOpenOrders: authenticatedOpenOrders.length,
+            authenticatedTrades: ledger.tradeCount,
+            ledgerMatchesPublicPositions: authenticatedLedgerHealthy,
+            realizedLoss: ledger.realizedLoss,
+          },
+          "Authenticated account state reconciled",
+        );
+      } catch (error) {
+        authenticatedLedgerHealthy = false;
+        this.logger.error(
+          { eventId: event.eventId, error },
+          "Authenticated trade ledger could not be reconstructed; live execution is blocked",
+        );
+      }
+    }
     const unconfirmedLeaderZeroTokens = this.state.observeLeaderPositions(
       event.eventId,
       this.config.leaderProfileWallet,
@@ -96,17 +149,16 @@ export class Reconciler {
       }),
     );
 
-    const followerLedgerKey = this.config.followerProfileWallet ?? "simulated-empty-follower";
     const plan = buildReconciliationPlan({
       event,
       leaderPositions,
       followerPositions,
-      pendingOrders: this.state.getOpenOrders(event.eventId),
+      pendingOrders,
       books,
       copyRatio: this.config.copy.shareRatio,
       maxOpenDebit: this.config.risk.maxOpenDebitUsd,
       maxEventLoss: this.config.risk.maxEventLossUsd,
-      realizedLoss: this.state.getRealizedLoss(event.eventId, followerLedgerKey),
+      realizedLoss,
       maxPriceDriftAbs: this.config.execution.maxPriceDriftAbs,
       maxSlippageBps: this.config.execution.maxSlippageBps,
       maxBookAgeMs: this.config.execution.maxBookAgeMs,
@@ -133,12 +185,80 @@ export class Reconciler {
         actionable: actionable.length,
         skipped: skipped.length,
         decisionSummary,
-        dryRun: true,
+        executionMode: this.config.execution.mode,
       },
       "Reconciliation completed",
     );
     for (const decision of [...actionable, ...skipped]) {
-      this.logger.info({ runId: plan.runId, ...decision, dryRun: true }, "Dry-run decision");
+      this.logger.info(
+        { runId: plan.runId, ...decision, executionMode: this.config.execution.mode },
+        this.config.execution.mode === "live" ? "Live reconciliation decision" : "Non-live reconciliation decision",
+      );
+    }
+
+    if (this.config.execution.mode === "live") {
+      if (!this.authenticatedClob) {
+        throw new Error("Live mode requires an authenticated CLOB client");
+      }
+      if (!authenticatedLedgerHealthy) {
+        this.logger.error({ runId: plan.runId }, "Live order blocked by unhealthy authenticated ledger");
+        return plan;
+      }
+      if (this.state.hasUnresolvedExecutionAttempt(event.eventId)) {
+        this.logger.error(
+          { runId: plan.runId, eventId: event.eventId },
+          "Live order blocked by an unresolved prior execution attempt",
+        );
+        return plan;
+      }
+
+      const decision = actionable.slice(0, this.config.execution.maxOrdersPerCycle)[0];
+      if (decision) {
+        const asset = event.assets.find((candidate) => candidate.tokenId === decision.tokenId);
+        if (!asset) {
+          throw new Error(`Actionable token ${decision.tokenId} is outside the discovered event`);
+        }
+        try {
+          await this.authenticatedClob.preflightFok(decision);
+        } catch (error) {
+          this.logger.error(
+            { runId: plan.runId, tokenId: decision.tokenId, error },
+            "Live order preflight failed before any execution intent was created",
+          );
+          return plan;
+        }
+        const attemptId = randomUUID();
+        this.state.beginExecutionAttempt({
+          attemptId,
+          runId: plan.runId,
+          eventId: event.eventId,
+          tokenId: decision.tokenId,
+          side: decision.action as "BUY" | "SELL",
+          requestedShares: new Decimal(decision.deltaSize).abs().toFixed(),
+          expectedDebit: decision.estimatedDebit,
+        });
+        try {
+          const receipt = await this.authenticatedClob.executeFok(decision, asset);
+          this.state.completeExecutionAttempt(attemptId, receipt.orderId, { ...receipt });
+          this.logger.info(
+            {
+              runId: plan.runId,
+              attemptId,
+              orderId: receipt.orderId,
+              status: receipt.status,
+              tradeIds: receipt.tradeIds,
+              transactionHashes: receipt.transactionHashes,
+            },
+            "Guarded FOK order completed; the next cycle will reconcile before any further order",
+          );
+        } catch (error) {
+          this.logger.fatal(
+            { runId: plan.runId, attemptId, tokenId: decision.tokenId, error },
+            "Live order result is unresolved; execution is now fail-closed",
+          );
+          throw error;
+        }
+      }
     }
     return plan;
   }

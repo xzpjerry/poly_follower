@@ -72,6 +72,7 @@ export interface OrderBookLevel {
 export interface OrderBook {
   tokenId: string;
   market: string;
+  sourceTimestampMs?: number;
   timestampMs: number;
   bids: OrderBookLevel[];
   asks: OrderBookLevel[];
@@ -87,6 +88,24 @@ export interface PendingOrder {
   side: "BUY" | "SELL";
   remainingShares: string;
   reservedDebit: string;
+}
+
+export interface FollowerTrade {
+  tradeId: string;
+  tokenId: string;
+  side: "BUY" | "SELL";
+  size: string;
+  price: string;
+  traderSide: "TAKER" | "MAKER";
+  matchedAt: string;
+  raw: unknown;
+}
+
+export interface ReconstructedEventLedger {
+  sizes: Map<string, string>;
+  realizedLoss: string;
+  grossBuyDebit: string;
+  tradeCount: number;
 }
 
 export type DecisionAction = "BUY" | "SELL" | "HOLD" | "SKIP";
