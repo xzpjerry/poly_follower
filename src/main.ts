@@ -77,14 +77,17 @@ async function main(): Promise<void> {
       await safety.assertCanTrade();
     }
     if (config.alerts.pushover.enabled) {
+      const invocation = cli.once ? "one-shot" : "continuous";
       await alerts.send({
-        dedupeKey: `authenticated-service-started:${config.execution.mode}`,
+        dedupeKey: `authenticated-service-started:${config.execution.mode}:${invocation}`,
         title: `Polymarket follower ${config.execution.mode}`,
         message: [
           `Mode: ${config.execution.mode}`,
+          `Invocation: ${invocation}`,
           `Closed only: ${accountStatus.closedOnly}`,
           `Collateral balance: ${accountStatus.collateralBalanceUsd} pUSD`,
-          "User WebSocket and authenticated polling are enabled for continuous runs",
+          `User WebSocket: ${cli.once ? "not started (one-shot)" : "enabled"}`,
+          `Authenticated polling: ${cli.once ? "one reconciliation" : `every ${config.monitoring.fullReconcileSeconds} seconds`}`,
         ].join("\n"),
         priority: config.execution.mode === "live" ? 1 : 0,
       });

@@ -51,6 +51,15 @@ sudo systemd-run --wait --pipe --collect \
 
 The production unit template is `deploy/polymarket-weather-follower.service`. Do not install or enable it until the read-only probe passes and the runtime mode is deliberately selected.
 
+Once installed, inspect the continuous authenticated-readonly observer with:
+
+```bash
+systemctl status polymarket-weather-follower.service
+journalctl -u polymarket-weather-follower.service --since today --no-pager
+```
+
+The startup notification explicitly reports `Invocation: one-shot` or `Invocation: continuous`, plus whether the User WebSocket is actually started and the authenticated polling interval.
+
 ## Decision audit notifications and live safety
 
 Set `alerts.pushover.enabled: true` in `authenticated-readonly` to receive the authenticated startup/account summary and each new or changed actionable decision. Initial `HOLD` decisions are silent; `BUY`, `SELL`, and `SKIP` changes are sent, as is a later transition back to `HOLD`. Identical 15-second reconciliations are suppressed by a persisted decision fingerprint, while every complete plan remains in SQLite for audit.
