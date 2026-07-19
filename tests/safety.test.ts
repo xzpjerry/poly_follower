@@ -31,7 +31,12 @@ describe("LiveSafetyController", () => {
     await safety.arm("test failure", { attemptId: "attempt-1" });
     expect(existsSync(sentinelPath)).toBe(true);
     await expect(safety.assertCanTrade()).rejects.toThrow("kill switch is armed");
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ priority: 2 }));
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        priority: 2,
+        message: expect.stringContaining('"attemptId":"attempt-1"'),
+      }),
+    );
     state.close();
 
     state = new StateDatabase(databasePath);

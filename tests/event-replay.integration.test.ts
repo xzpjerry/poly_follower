@@ -132,7 +132,12 @@ function replayFixture(): { event: DiscoveredEvent; first: TrackedAsset; second:
   return { event: makeEvent([first, second]), first, second };
 }
 
-function makeHarness(directory: string, account: ReplayAccount, state: StateDatabase) {
+function makeHarness(
+  directory: string,
+  account: ReplayAccount,
+  state: StateDatabase,
+  send = vi.fn(async (_alert: Parameters<AlertNotifier["send"]>[0]) => "delivered" as const),
+) {
   const { event, first, second } = replayFixture();
   state.upsertEvent(event);
   const gamma: GammaPort = {
@@ -150,7 +155,7 @@ function makeHarness(directory: string, account: ReplayAccount, state: StateData
     safety: { killSwitchPath: path.join(directory, "LIVE_TRADING_DISABLED") },
     state: { databasePath: path.join(directory, "state.sqlite") },
   });
-  const alerts: AlertNotifier = { send: vi.fn(async () => "delivered" as const) };
+  const alerts: AlertNotifier = { send };
   const safety = new LiveSafetyController(state, config.safety.killSwitchPath, alerts, pino({ enabled: false }));
   const reconciler = new Reconciler(
     config,
@@ -164,7 +169,7 @@ function makeHarness(directory: string, account: ReplayAccount, state: StateData
     alerts,
     { isHealthy: () => true },
   );
-  return { event, first, second, safety, reconciler };
+  return { event, first, second, safety, reconciler, send };
 }
 
 describe("full Event replay through Mock CLOB", () => {
@@ -179,6 +184,13 @@ describe("full Event replay through Mock CLOB", () => {
     account.leaderPositions = [makePosition(harness.first.tokenId, "40", "0.25")];
     const plans = [await harness.reconciler.runOnce(harness.event)];
     expect(account.executionCount).toBe(1);
+    expect(harness.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Polymarket order accepted",
+        message: expect.stringMatching(/Attempt: .+\nOrder: order-1/),
+        priority: 1,
+      }),
+    );
     plans.push(await harness.reconciler.runOnce(harness.event));
     expect(account.executionCount).toBe(1);
 
@@ -254,7 +266,42 @@ describe("full Event replay through Mock CLOB", () => {
     await harness.reconciler.runOnce(harness.event);
     expect(account.executionCount).toBe(0);
     expect(state.hasUnresolvedExecutionAttempt(harness.event.eventId)).toBe(false);
+    expect(harness.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Polymarket order preflight failed",
+        message: expect.stringContaining("Reason: insufficient allowance"),
+        priority: 1,
+      }),
+    );
     await expect(harness.safety.isArmed()).resolves.toBe(false);
+    state.close();
+  });
+
+  it("does not call the CLOB when the pre-submission audit notification fails", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-intent-alert-failure-"));
+    temporaryDirectories.push(directory);
+    const account = new ReplayAccount();
+    const state = new StateDatabase(path.join(directory, "state.sqlite"));
+    const send = vi.fn(async (alert: Parameters<AlertNotifier["send"]>[0]) => {
+      if (alert.title === "Polymarket order submitting") {
+        throw new Error("simulated Pushover outage");
+      }
+      return "delivered" as const;
+    });
+    const harness = makeHarness(directory, account, state, send);
+    account.leaderPositions = [makePosition(harness.first.tokenId, "40", "0.25")];
+
+    await harness.reconciler.runOnce(harness.event);
+
+    expect(account.executionCount).toBe(0);
+    expect(state.hasUnresolvedExecutionAttempt(harness.event.eventId)).toBe(false);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining("order intent notification failed"),
+        priority: 2,
+      }),
+    );
+    await expect(harness.safety.isArmed()).resolves.toBe(true);
     state.close();
   });
 
@@ -272,5 +319,42 @@ describe("full Event replay through Mock CLOB", () => {
     await expect(harness.safety.isArmed()).resolves.toBe(true);
     expect(state.hasUnresolvedExecutionAttempt(harness.event.eventId)).toBe(false);
     state.close();
+  });
+
+  it("stops live trading and sends attempt identifiers after a 180-second terminal timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-19T01:00:00.000Z"));
+      const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-terminal-timeout-"));
+      temporaryDirectories.push(directory);
+      const account = new ReplayAccount();
+      const state = new StateDatabase(path.join(directory, "state.sqlite"));
+      const harness = makeHarness(directory, account, state);
+      state.beginExecutionAttempt({
+        attemptId: "attempt-over-180-seconds",
+        runId: "run-old",
+        eventId: harness.event.eventId,
+        tokenId: harness.first.tokenId,
+        side: "BUY",
+        requestedShares: "10",
+        expectedDebit: "2.5",
+      });
+
+      vi.advanceTimersByTime(181_000);
+      await harness.reconciler.runOnce(harness.event);
+
+      await expect(harness.safety.isArmed()).resolves.toBe(true);
+      expect(harness.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Polymarket follower stopped",
+          message: expect.stringContaining("attempt-over-180-seconds"),
+          priority: 2,
+        }),
+      );
+      expect(account.executionCount).toBe(0);
+      state.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

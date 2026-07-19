@@ -12,6 +12,16 @@ const pushoverResponseSchema = z.object({
   request: z.string().optional(),
   receipt: z.string().optional(),
 });
+const PUSHOVER_TITLE_LIMIT = 250;
+const PUSHOVER_MESSAGE_LIMIT = 1024;
+
+function truncateCodePoints(value: string, limit: number): string {
+  const points = [...value];
+  if (points.length <= limit) {
+    return value;
+  }
+  return `${points.slice(0, Math.max(0, limit - 1)).join("")}…`;
+}
 
 export type AlertPriority = -2 | -1 | 0 | 1 | 2;
 
@@ -42,22 +52,30 @@ export class PushoverNotifier implements AlertNotifier {
   ) {}
 
   public async send(alert: AlertMessage): Promise<"delivered" | "deduplicated"> {
+    const normalizedAlert: AlertMessage = {
+      ...alert,
+      title: truncateCodePoints(alert.title, PUSHOVER_TITLE_LIMIT),
+      message: truncateCodePoints(alert.message, PUSHOVER_MESSAGE_LIMIT),
+    };
     const since = new Date(Date.now() - this.config.dedupeSeconds * 1000).toISOString();
-    if (this.state.wasAlertDeliveredSince(alert.dedupeKey, since)) {
-      this.logger.info({ dedupeKey: alert.dedupeKey }, "Pushover alert suppressed by deduplication window");
+    if (this.state.wasAlertDeliveredSince(normalizedAlert.dedupeKey, since)) {
+      this.logger.info(
+        { dedupeKey: normalizedAlert.dedupeKey },
+        "Pushover alert suppressed by deduplication window",
+      );
       return "deduplicated";
     }
 
     const deliveryId = randomUUID();
-    this.state.beginAlertDelivery({ deliveryId, ...alert });
+    this.state.beginAlertDelivery({ deliveryId, ...normalizedAlert });
     const form = new URLSearchParams({
       token: this.credentials.applicationToken,
       user: this.credentials.userKey,
-      title: alert.title,
-      message: alert.message,
-      priority: String(alert.priority),
+      title: normalizedAlert.title,
+      message: normalizedAlert.message,
+      priority: String(normalizedAlert.priority),
     });
-    if (alert.priority === 2) {
+    if (normalizedAlert.priority === 2) {
       form.set("sound", "persistent");
       form.set("retry", String(this.config.emergencyRetrySeconds));
       form.set("expire", String(this.config.emergencyExpireSeconds));
@@ -82,7 +100,7 @@ export class PushoverNotifier implements AlertNotifier {
         ...(parsed.data.receipt ? { receipt: parsed.data.receipt } : {}),
       });
       this.logger.info(
-        { deliveryId, requestId: parsed.data.request, priority: alert.priority },
+        { deliveryId, requestId: parsed.data.request, priority: normalizedAlert.priority },
         "Pushover alert delivered",
       );
       return "delivered";

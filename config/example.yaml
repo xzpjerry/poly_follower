@@ -42,7 +42,10 @@ execution:
 
 alerts:
   pushover:
-    # Required in live mode. Credentials are loaded only from *_FILE runtime secrets.
+    # Enable in authenticated-readonly to audit changed decisions; required in live.
+    # Credentials are loaded only from *_FILE runtime secrets.
+    # Initial HOLD is silent. BUY/SELL/SKIP changes and a later return to HOLD are sent.
+    # Every full plan remains in SQLite even when an unchanged decision is not pushed.
     enabled: false
     request_timeout_ms: 10000
     emergency_retry_seconds: 30

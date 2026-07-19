@@ -75,11 +75,18 @@ async function main(): Promise<void> {
     }
     if (config.execution.mode === "live") {
       await safety.assertCanTrade();
+    }
+    if (config.alerts.pushover.enabled) {
       await alerts.send({
-        dedupeKey: "live-service-started",
-        title: "Polymarket follower live",
-        message: "Live follower started; User WebSocket and authenticated polling are active",
-        priority: 1,
+        dedupeKey: `authenticated-service-started:${config.execution.mode}`,
+        title: `Polymarket follower ${config.execution.mode}`,
+        message: [
+          `Mode: ${config.execution.mode}`,
+          `Closed only: ${accountStatus.closedOnly}`,
+          `Collateral balance: ${accountStatus.collateralBalanceUsd} pUSD`,
+          "User WebSocket and authenticated polling are enabled for continuous runs",
+        ].join("\n"),
+        priority: config.execution.mode === "live" ? 1 : 0,
       });
     }
   }

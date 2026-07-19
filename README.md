@@ -51,9 +51,13 @@ sudo systemd-run --wait --pipe --collect \
 
 The production unit template is `deploy/polymarket-weather-follower.service`. Do not install or enable it until the read-only probe passes and the runtime mode is deliberately selected.
 
-## Live safety controls
+## Decision audit notifications and live safety
 
-Live mode requires `alerts.pushover.enabled: true` plus file-backed `PUSHOVER_APP_TOKEN_FILE` and `PUSHOVER_USER_KEY_FILE`. Emergency failures use priority 2 with retry/expiry, while startup, accepted orders, confirmations, and cancellations use lower priorities. Delivery attempts and emergency receipts are stored in SQLite without storing either credential.
+Set `alerts.pushover.enabled: true` in `authenticated-readonly` to receive the authenticated startup/account summary and each new or changed actionable decision. Initial `HOLD` decisions are silent; `BUY`, `SELL`, and `SKIP` changes are sent, as is a later transition back to `HOLD`. Identical 15-second reconciliations are suppressed by a persisted decision fingerprint, while every complete plan remains in SQLite for audit.
+
+Live mode requires alerts plus file-backed `PUSHOVER_APP_TOKEN_FILE` and `PUSHOVER_USER_KEY_FILE`. It sends separate priority-1 notifications for the decision, preflight failure, pre-submission intent, and exchange acceptance. `CONFIRMED` and `CANCELLATION` terminal states are also sent. Ambiguous submissions, `FAILED` trades, unhealthy User WebSocket outages, and execution attempts that remain non-terminal for `execution.terminal_timeout_seconds` (default 180 seconds) arm the persistent kill switch and send priority 2 with event/trade/attempt identifiers. If the pre-submission intent notification cannot be delivered, the attempt is aborted locally before any CLOB request and live trading is stopped.
+
+Pushover delivery attempts, decision fingerprints, and emergency receipts are stored in SQLite without storing either credential. Titles/messages are capped at Pushover's 250/1,024-character API limits.
 
 The kill switch is armed in both SQLite and `data/LIVE_TRADING_DISABLED`. Either source blocks every new live order. The fastest manual stop is safe even if the application cannot start:
 

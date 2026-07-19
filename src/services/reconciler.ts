@@ -10,6 +10,7 @@ import { compareLedgerToPublicPositions, reconstructEventLedger } from "../domai
 import type { DiscoveredEvent, OrderBook, ReconciliationPlan, UserPosition } from "../domain/types.js";
 import { StateDatabase } from "../persistence/database.js";
 import { NoopAlertNotifier, type AlertNotifier } from "./alerts.js";
+import { notifyDecisionChanges } from "./decision-audit.js";
 import type {
   AuthenticatedClobPort,
   ClobPublicPort,
@@ -255,6 +256,27 @@ export class Reconciler {
       );
     }
 
+    if (this.config.alerts.pushover.enabled && this.config.execution.mode !== "dry-run") {
+      try {
+        const notified = await notifyDecisionChanges(
+          this.state,
+          this.alerts,
+          plan,
+          this.config.execution.mode,
+        );
+        this.logger.info({ runId: plan.runId, notified }, "Decision audit notifications reconciled");
+      } catch (error) {
+        this.logger.error({ runId: plan.runId, error }, "Decision audit notification failed");
+        if (this.config.execution.mode === "live") {
+          await this.requireSafety().arm("decision audit notification failed", {
+            eventId: event.eventId,
+            runId: plan.runId,
+          });
+        }
+        return plan;
+      }
+    }
+
     if (this.config.execution.mode === "live") {
       if (!this.authenticatedClob) {
         throw new Error("Live mode requires an authenticated CLOB client");
@@ -298,10 +320,31 @@ export class Reconciler {
         try {
           await this.authenticatedClob.preflightFok(decision);
         } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "unknown preflight error";
           this.logger.error(
             { runId: plan.runId, tokenId: decision.tokenId, error },
             "Live order preflight failed before any execution intent was created",
           );
+          try {
+            await this.alerts.send({
+              dedupeKey: `preflight-failed:${plan.runId}:${decision.tokenId}`,
+              title: "Polymarket order preflight failed",
+              message: [
+                `Event: ${event.eventSlug}`,
+                `Run: ${plan.runId}`,
+                `Action: ${decision.action}`,
+                `Token: ${decision.tokenId}`,
+                `Delta: ${decision.deltaSize}`,
+                `Reason: ${errorMessage}`,
+              ].join("\n"),
+              priority: 1,
+            });
+          } catch (notificationError) {
+            this.logger.error(
+              { runId: plan.runId, notificationError },
+              "Preflight failure notification could not be delivered",
+            );
+          }
           return plan;
         }
         const attemptId = randomUUID();
@@ -315,13 +358,51 @@ export class Reconciler {
           expectedDebit: decision.estimatedDebit,
         });
         try {
+          await this.alerts.send({
+            dedupeKey: `order-submitting:${attemptId}`,
+            title: "Polymarket order submitting",
+            message: [
+              `Event: ${event.eventSlug}`,
+              `Run: ${plan.runId}`,
+              `Attempt: ${attemptId}`,
+              `Action: ${decision.action}`,
+              `Token: ${decision.tokenId}`,
+              `Shares: ${new Decimal(decision.deltaSize).abs().toFixed()}`,
+              `Expected debit: ${decision.estimatedDebit}`,
+              `Worst price: ${decision.worstPrice ?? "n/a"}`,
+            ].join("\n"),
+            priority: 1,
+          });
+        } catch (error) {
+          this.state.abortExecutionAttempt(attemptId, {
+            reason: "order intent notification failed before CLOB submission",
+          });
+          await this.requireSafety().arm("order intent notification failed", {
+            eventId: event.eventId,
+            runId: plan.runId,
+            attemptId,
+          });
+          return plan;
+        }
+        try {
           const receipt = await this.authenticatedClob.executeFok(decision, asset);
           this.state.acceptExecutionAttempt(attemptId, receipt.orderId, { ...receipt }, receipt.tradeIds);
           await this.alerts.send({
             dedupeKey: `order-accepted:${receipt.orderId}`,
             title: "Polymarket order accepted",
-            message: `${decision.action} ${new Decimal(decision.deltaSize).abs().toFixed()} shares accepted for ${event.eventSlug}; awaiting terminal status`,
-            priority: 0,
+            message: [
+              `Event: ${event.eventSlug}`,
+              `Run: ${plan.runId}`,
+              `Attempt: ${attemptId}`,
+              `Order: ${receipt.orderId}`,
+              `Action: ${decision.action}`,
+              `Token: ${decision.tokenId}`,
+              `Shares: ${new Decimal(decision.deltaSize).abs().toFixed()}`,
+              `CLOB status: ${receipt.status}`,
+              `Trades: ${receipt.tradeIds.join(",") || "pending"}`,
+              "Terminal status: pending",
+            ].join("\n"),
+            priority: 1,
           });
           this.logger.info(
             {

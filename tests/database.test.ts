@@ -169,4 +169,32 @@ describe("StateDatabase", () => {
     expect(state.getExecutionAttemptState("attempt-cancelled")).toBe("cancelled");
     state.close();
   });
+
+  it("persists decision notification state and can abort before CLOB submission", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-audit-state-"));
+    temporaryDirectories.push(directory);
+    const state = new StateDatabase(path.join(directory, "state.sqlite"));
+
+    expect(state.getDecisionAlertState("event-123", "token")).toBeNull();
+    state.setDecisionAlertState("event-123", "token", "fingerprint-1", "BUY");
+    expect(state.getDecisionAlertState("event-123", "token")).toEqual({
+      fingerprint: "fingerprint-1",
+      action: "BUY",
+    });
+
+    state.beginExecutionAttempt({
+      attemptId: "attempt-aborted",
+      runId: "run-1",
+      eventId: "event-123",
+      tokenId: "token",
+      side: "BUY",
+      requestedShares: "5",
+      expectedDebit: "2",
+    });
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(true);
+    state.abortExecutionAttempt("attempt-aborted", { reason: "notification failed" });
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(false);
+    expect(state.getExecutionAttemptState("attempt-aborted")).toBe("aborted");
+    state.close();
+  });
 });

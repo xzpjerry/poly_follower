@@ -252,6 +252,15 @@ export class StateDatabase {
 
       CREATE INDEX IF NOT EXISTS alert_deliveries_dedupe_idx
       ON alert_deliveries(dedupe_key, state, updated_at);
+
+      CREATE TABLE IF NOT EXISTS decision_alert_state (
+        event_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        action TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(event_id, token_id)
+      );
     `);
   }
 
@@ -903,6 +912,48 @@ export class StateDatabase {
     return row
       ? { state: row.state, requestId: row.request_id, receipt: row.receipt }
       : null;
+  }
+
+  public getDecisionAlertState(
+    eventId: string,
+    tokenId: string,
+  ): { fingerprint: string; action: string } | null {
+    const row = this.database
+      .prepare(
+        `SELECT fingerprint, action FROM decision_alert_state
+         WHERE event_id = ? AND token_id = ?`,
+      )
+      .get(eventId, tokenId) as { fingerprint: string; action: string } | undefined;
+    return row ?? null;
+  }
+
+  public setDecisionAlertState(
+    eventId: string,
+    tokenId: string,
+    fingerprint: string,
+    action: string,
+  ): void {
+    this.database
+      .prepare(
+        `INSERT INTO decision_alert_state (
+           event_id, token_id, fingerprint, action, updated_at
+         ) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(event_id, token_id) DO UPDATE SET
+           fingerprint = excluded.fingerprint,
+           action = excluded.action,
+           updated_at = excluded.updated_at`,
+      )
+      .run(eventId, tokenId, fingerprint, action, new Date().toISOString());
+  }
+
+  public abortExecutionAttempt(attemptId: string, response: Record<string, unknown>): void {
+    this.database
+      .prepare(
+        `UPDATE execution_attempts
+         SET state = 'aborted', response_json = ?, updated_at = ?
+         WHERE attempt_id = ? AND state = 'submitting'`,
+      )
+      .run(JSON.stringify(response), new Date().toISOString(), attemptId);
   }
 
   public getOpenOrders(eventId: string): PendingOrder[] {

@@ -50,10 +50,11 @@ export class LiveSafetyController {
 
     this.logger.fatal({ reason, details, newlyArmed }, "Live trading kill switch armed");
     try {
+      const detailText = Object.keys(details).length > 0 ? `\nDetails: ${JSON.stringify(details)}` : "";
       await this.alerts.send({
         dedupeKey: `kill-switch:${reason}`,
         title: "Polymarket follower stopped",
-        message: `Live trading disabled: ${reason}`,
+        message: `Live trading disabled: ${reason}${detailText}`,
         priority: 2,
       });
     } catch (error) {
