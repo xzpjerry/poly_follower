@@ -1,0 +1,33 @@
+leader_profile_wallet: "0x0000000000000000000000000000000000000000"
+follower_profile_wallet: null
+simulate_empty_follower: true
+
+scope:
+  event_slug: "replace-with-gamma-event-slug"
+  include_yes_tokens: true
+  include_no_tokens: true
+
+copy:
+  share_ratio: "0.25"
+  sync_existing_positions_on_start: true
+
+risk:
+  max_open_debit_usd: "5.00"
+  max_event_loss_usd: "5.00"
+
+monitoring:
+  activity_poll_ms: 1500
+  activity_overlap_seconds: 10
+  full_reconcile_seconds: 15
+  request_timeout_ms: 10000
+
+execution:
+  mode: "dry-run"
+  max_signal_age_seconds: 30
+  max_price_drift_abs: "0.02"
+  max_slippage_bps: 300
+  max_book_age_ms: 2000
+  stop_before_end_seconds: 120
+
+state:
+  database_path: "data/state.sqlite"

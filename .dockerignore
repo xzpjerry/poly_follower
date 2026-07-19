@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+.env
+.env.*
+docs/
+data/
+dist/
+logs/
+node_modules/
+config/local.yaml
+config/runtime.yaml

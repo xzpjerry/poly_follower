@@ -1,0 +1,12 @@
+services:
+  follower:
+    build:
+      context: .
+    restart: "no"
+    environment:
+      APP_CONFIG: /app/config/runtime.yaml
+      FOLLOWER_PROFILE_WALLET: ${FOLLOWER_PROFILE_WALLET:-}
+    volumes:
+      - ./config/runtime.yaml:/app/config/runtime.yaml:ro
+      - ./data:/app/data
+    command: ["--once", "--config", "/app/config/runtime.yaml"]

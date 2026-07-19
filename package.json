@@ -1,0 +1,33 @@
+{
+  "name": "polymarket-weather-follower",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx src/main.ts",
+    "once": "tsx src/main.ts --once",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "decimal.js": "^10.5.0",
+    "dotenv": "^16.4.7",
+    "pino": "^9.6.0",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
