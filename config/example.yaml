@@ -37,6 +37,22 @@ execution:
   max_slippage_bps: 300
   max_book_age_ms: 2000
   stop_before_end_seconds: 120
+  # An accepted order remains fail-closed until CONFIRMED/FAILED/CANCELLATION.
+  terminal_timeout_seconds: 180
+
+alerts:
+  pushover:
+    # Required in live mode. Credentials are loaded only from *_FILE runtime secrets.
+    enabled: false
+    request_timeout_ms: 10000
+    emergency_retry_seconds: 30
+    emergency_expire_seconds: 3600
+    dedupe_seconds: 300
+
+safety:
+  # Either this file or the persistent SQLite flag blocks all new live orders.
+  kill_switch_path: "data/LIVE_TRADING_DISABLED"
+  user_stream_unhealthy_seconds: 60
 
 state:
   database_path: "data/state.sqlite"

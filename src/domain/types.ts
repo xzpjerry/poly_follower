@@ -98,6 +98,34 @@ export interface FollowerTrade {
   price: string;
   traderSide: "TAKER" | "MAKER";
   matchedAt: string;
+  status: TradeLifecycleStatus;
+  orderIds: string[];
+  transactionHash: string | null;
+  raw: unknown;
+}
+
+export type TradeLifecycleStatus = "MATCHED" | "MINED" | "CONFIRMED" | "RETRYING" | "FAILED";
+
+export interface TradeLifecycleUpdate {
+  eventId: string;
+  tradeId: string;
+  status: TradeLifecycleStatus;
+  orderIds: string[];
+  transactionHash: string | null;
+  source: "user-websocket" | "authenticated-poll";
+  raw: unknown;
+}
+
+export type UserOrderEventType = "PLACEMENT" | "UPDATE" | "CANCELLATION";
+
+export interface UserOrderUpdate {
+  eventId: string;
+  orderId: string;
+  tokenId: string;
+  type: UserOrderEventType;
+  sizeMatched: string;
+  originalSize: string;
+  source: "user-websocket";
   raw: unknown;
 }
 

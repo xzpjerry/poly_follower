@@ -87,7 +87,7 @@ describe("StateDatabase", () => {
     state.close();
   });
 
-  it("keeps ambiguous execution attempts fail-closed until completed", () => {
+  it("keeps accepted and matched attempts fail-closed until a terminal trade state", () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-"));
     temporaryDirectories.push(directory);
     const state = new StateDatabase(path.join(directory, "state.sqlite"));
@@ -101,8 +101,72 @@ describe("StateDatabase", () => {
       expectedDebit: "2",
     });
     expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(true);
-    state.completeExecutionAttempt("attempt-1", "order-1", { status: "matched" });
+    state.acceptExecutionAttempt("attempt-1", "order-1", { status: "matched" }, ["trade-1"]);
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(true);
+    state.recordTradeLifecycle({
+      eventId: "event-123",
+      tradeId: "trade-1",
+      status: "MATCHED",
+      orderIds: ["order-1"],
+      transactionHash: null,
+      source: "user-websocket",
+      raw: {},
+    });
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(true);
+    state.recordTradeLifecycle({
+      eventId: "event-123",
+      tradeId: "trade-1",
+      status: "CONFIRMED",
+      orderIds: [],
+      transactionHash: "0xtransaction",
+      source: "authenticated-poll",
+      raw: {},
+    });
     expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(false);
+    expect(state.getExecutionAttemptState("attempt-1")).toBe("confirmed");
+    expect(
+      state.recordTradeLifecycle({
+        eventId: "event-123",
+        tradeId: "trade-1",
+        status: "FAILED",
+        orderIds: ["order-1"],
+        transactionHash: null,
+        source: "user-websocket",
+        raw: {},
+      }),
+    ).toBe(0);
+    expect(state.getExecutionAttemptState("attempt-1")).toBe("confirmed");
+    state.close();
+  });
+
+  it("treats an authenticated order cancellation as terminal", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "weather-follower-"));
+    temporaryDirectories.push(directory);
+    const state = new StateDatabase(path.join(directory, "state.sqlite"));
+    state.beginExecutionAttempt({
+      attemptId: "attempt-cancelled",
+      runId: "run-1",
+      eventId: "event-123",
+      tokenId: "token",
+      side: "BUY",
+      requestedShares: "5",
+      expectedDebit: "2",
+    });
+    state.acceptExecutionAttempt("attempt-cancelled", "order-cancelled", { status: "matched" });
+    expect(
+      state.recordUserOrderUpdate({
+        eventId: "event-123",
+        orderId: "order-cancelled",
+        tokenId: "token",
+        type: "CANCELLATION",
+        sizeMatched: "0",
+        originalSize: "5",
+        source: "user-websocket",
+        raw: {},
+      }),
+    ).toBe(1);
+    expect(state.hasUnresolvedExecutionAttempt("event-123")).toBe(false);
+    expect(state.getExecutionAttemptState("attempt-cancelled")).toBe("cancelled");
     state.close();
   });
 });

@@ -5,6 +5,7 @@ import type {
   TrackedAsset,
   UserPosition,
 } from "../src/domain/types.js";
+import type { AppConfig } from "../src/config.js";
 
 export const noFee: FeeSchedule = {
   enabled: false,
@@ -82,5 +83,81 @@ export function makeBook(
     asks,
     bids,
     raw: {},
+  };
+}
+
+type AppConfigOverrides = Partial<
+  Omit<AppConfig, "scope" | "copy" | "risk" | "monitoring" | "execution" | "alerts" | "safety" | "state">
+> & {
+  scope?: Partial<AppConfig["scope"]>;
+  copy?: Partial<AppConfig["copy"]>;
+  risk?: Partial<AppConfig["risk"]>;
+  monitoring?: Partial<AppConfig["monitoring"]>;
+  execution?: Partial<AppConfig["execution"]>;
+  alerts?: { pushover?: Partial<AppConfig["alerts"]["pushover"]> };
+  safety?: Partial<AppConfig["safety"]>;
+  state?: Partial<AppConfig["state"]>;
+};
+
+export function makeConfig(overrides: AppConfigOverrides = {}): AppConfig {
+  const base: AppConfig = {
+    leaderProfileWallet: "0x1111111111111111111111111111111111111111",
+    followerProfileWallet: "0x2222222222222222222222222222222222222222",
+    simulateEmptyFollower: false,
+    scope: {
+      eventSlug: "sample-weather-event",
+      seriesSlug: null,
+      eventDate: null,
+      timeZone: "Asia/Hong_Kong",
+      includeYesTokens: true,
+      includeNoTokens: true,
+    },
+    copy: { shareRatio: "0.25", syncExistingPositionsOnStart: true },
+    risk: { maxOpenDebitUsd: "5", maxEventLossUsd: "5" },
+    monitoring: {
+      activityPollMs: 250,
+      activityOverlapSeconds: 10,
+      fullReconcileSeconds: 15,
+      requestTimeoutMs: 10_000,
+    },
+    execution: {
+      mode: "dry-run",
+      signatureType: 3,
+      maxOrdersPerCycle: 1,
+      maxSignalAgeSeconds: 30,
+      maxPriceDriftAbs: "0.02",
+      maxSlippageBps: 300,
+      maxBookAgeMs: 2000,
+      stopBeforeEndSeconds: 120,
+      terminalTimeoutSeconds: 180,
+    },
+    alerts: {
+      pushover: {
+        enabled: false,
+        requestTimeoutMs: 10_000,
+        emergencyRetrySeconds: 30,
+        emergencyExpireSeconds: 3600,
+        dedupeSeconds: 300,
+      },
+    },
+    safety: {
+      killSwitchPath: "/tmp/polymarket-weather-follower-test-kill-switch",
+      userStreamUnhealthySeconds: 60,
+    },
+    state: { databasePath: "/tmp/polymarket-weather-follower-test.sqlite" },
+  };
+  return {
+    ...base,
+    ...overrides,
+    scope: { ...base.scope, ...overrides.scope },
+    copy: { ...base.copy, ...overrides.copy },
+    risk: { ...base.risk, ...overrides.risk },
+    monitoring: { ...base.monitoring, ...overrides.monitoring },
+    execution: { ...base.execution, ...overrides.execution },
+    alerts: {
+      pushover: { ...base.alerts.pushover, ...overrides.alerts?.pushover },
+    },
+    safety: { ...base.safety, ...overrides.safety },
+    state: { ...base.state, ...overrides.state },
   };
 }

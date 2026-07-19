@@ -10,6 +10,8 @@ import type {
   ReconciliationPlan,
   UserActivity,
   UserPosition,
+  TradeLifecycleUpdate,
+  UserOrderUpdate,
 } from "../domain/types.js";
 
 interface CursorRow {
@@ -185,6 +187,71 @@ export class StateDatabase {
 
       CREATE INDEX IF NOT EXISTS execution_attempts_event_idx
       ON execution_attempts(event_id, state, created_at);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS execution_attempts_one_unresolved_idx
+      ON execution_attempts((1))
+      WHERE state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying');
+
+      CREATE TABLE IF NOT EXISTS execution_attempt_trades (
+        attempt_id TEXT NOT NULL REFERENCES execution_attempts(attempt_id),
+        trade_id TEXT NOT NULL,
+        PRIMARY KEY(attempt_id, trade_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_stream_events (
+        fingerprint TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        trade_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        order_ids_json TEXT NOT NULL,
+        transaction_hash TEXT,
+        source TEXT NOT NULL,
+        raw_json TEXT NOT NULL,
+        observed_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS user_stream_events_trade_idx
+      ON user_stream_events(event_id, trade_id, observed_at);
+
+      CREATE TABLE IF NOT EXISTS user_order_events (
+        fingerprint TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        order_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        size_matched TEXT NOT NULL,
+        original_size TEXT NOT NULL,
+        source TEXT NOT NULL,
+        raw_json TEXT NOT NULL,
+        observed_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS user_order_events_order_idx
+      ON user_order_events(event_id, order_id, observed_at);
+
+      CREATE TABLE IF NOT EXISTS safety_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS alert_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        dedupe_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        priority INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        request_id TEXT,
+        receipt TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS alert_deliveries_dedupe_idx
+      ON alert_deliveries(dedupe_key, state, updated_at);
     `);
   }
 
@@ -505,10 +572,21 @@ export class StateDatabase {
     const row = this.database
       .prepare(
         `SELECT 1 AS present FROM execution_attempts
-         WHERE event_id = ? AND state = 'submitting'
+         WHERE event_id = ? AND state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying')
          LIMIT 1`,
       )
       .get(eventId) as { present: number } | undefined;
+    return row?.present === 1;
+  }
+
+  public hasAnyUnresolvedExecutionAttempt(): boolean {
+    const row = this.database
+      .prepare(
+        `SELECT 1 AS present FROM execution_attempts
+         WHERE state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying')
+         LIMIT 1`,
+      )
+      .get() as { present: number } | undefined;
     return row?.present === 1;
   }
 
@@ -542,18 +620,289 @@ export class StateDatabase {
       );
   }
 
-  public completeExecutionAttempt(
+  public acceptExecutionAttempt(
     attemptId: string,
     orderId: string,
     response: Record<string, unknown>,
+    tradeIds: string[] = [],
+  ): void {
+    const transaction = this.database.transaction(() => {
+      this.database
+        .prepare(
+          `UPDATE execution_attempts
+           SET state = 'accepted', order_id = ?, response_json = ?, updated_at = ?
+           WHERE attempt_id = ? AND state = 'submitting'`,
+        )
+        .run(orderId, JSON.stringify(response), new Date().toISOString(), attemptId);
+      const link = this.database.prepare(
+        `INSERT OR IGNORE INTO execution_attempt_trades (attempt_id, trade_id) VALUES (?, ?)`,
+      );
+      for (const tradeId of tradeIds) {
+        link.run(attemptId, tradeId);
+      }
+    });
+    transaction();
+  }
+
+  public recordTradeLifecycle(update: TradeLifecycleUpdate): number {
+    const fingerprint = createHash("sha256")
+      .update(
+        [
+          update.eventId,
+          update.tradeId,
+          update.status,
+          [...update.orderIds].sort().join(","),
+          update.transactionHash ?? "",
+          update.source,
+        ].join("|"),
+      )
+      .digest("hex");
+    const now = new Date().toISOString();
+    const transaction = this.database.transaction(() => {
+      const insert = this.database
+        .prepare(
+          `INSERT OR IGNORE INTO user_stream_events (
+             fingerprint, event_id, trade_id, status, order_ids_json,
+             transaction_hash, source, raw_json, observed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          fingerprint,
+          update.eventId,
+          update.tradeId,
+          update.status,
+          JSON.stringify(update.orderIds),
+          update.transactionHash,
+          update.source,
+          JSON.stringify(update.raw),
+          now,
+        );
+      if (insert.changes === 0) {
+        return 0;
+      }
+
+      const linkedAttempts = this.database
+        .prepare(
+          `SELECT DISTINCT execution_attempts.attempt_id
+           FROM execution_attempts
+           LEFT JOIN execution_attempt_trades
+             ON execution_attempt_trades.attempt_id = execution_attempts.attempt_id
+           WHERE execution_attempts.event_id = ?
+             AND (
+               execution_attempts.order_id IN (${update.orderIds.map(() => "?").join(",") || "NULL"})
+               OR execution_attempt_trades.trade_id = ?
+             )`,
+        )
+        .all(update.eventId, ...update.orderIds, update.tradeId) as Array<{ attempt_id: string }>;
+      const link = this.database.prepare(
+        `INSERT OR IGNORE INTO execution_attempt_trades (attempt_id, trade_id) VALUES (?, ?)`,
+      );
+      const nextState =
+        update.status === "CONFIRMED"
+          ? "confirmed"
+          : update.status === "FAILED"
+            ? "failed"
+            : update.status.toLowerCase();
+      const transition = this.database.prepare(
+        `UPDATE execution_attempts SET state = ?, updated_at = ?
+         WHERE attempt_id = ? AND state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying')`,
+      );
+      let transitioned = 0;
+      for (const attempt of linkedAttempts) {
+        link.run(attempt.attempt_id, update.tradeId);
+        transitioned += transition.run(nextState, now, attempt.attempt_id).changes;
+      }
+      return transitioned;
+    });
+    return transaction();
+  }
+
+  public getExecutionAttemptState(attemptId: string): string | null {
+    const row = this.database
+      .prepare(`SELECT state FROM execution_attempts WHERE attempt_id = ?`)
+      .get(attemptId) as { state: string } | undefined;
+    return row?.state ?? null;
+  }
+
+  public recordUserOrderUpdate(update: UserOrderUpdate): number {
+    const fingerprint = createHash("sha256")
+      .update(
+        [
+          update.eventId,
+          update.orderId,
+          update.type,
+          update.sizeMatched,
+          update.originalSize,
+        ].join("|"),
+      )
+      .digest("hex");
+    const now = new Date().toISOString();
+    const transaction = this.database.transaction(() => {
+      const inserted = this.database
+        .prepare(
+          `INSERT OR IGNORE INTO user_order_events (
+             fingerprint, event_id, order_id, token_id, event_type,
+             size_matched, original_size, source, raw_json, observed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          fingerprint,
+          update.eventId,
+          update.orderId,
+          update.tokenId,
+          update.type,
+          update.sizeMatched,
+          update.originalSize,
+          update.source,
+          JSON.stringify(update.raw),
+          now,
+        );
+      if (inserted.changes === 0) {
+        return 0;
+      }
+      if (update.type !== "CANCELLATION") {
+        return 0;
+      }
+      const changed = this.database
+        .prepare(
+          `UPDATE execution_attempts SET state = 'cancelled', updated_at = ?
+           WHERE event_id = ? AND order_id = ?
+             AND state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying')`,
+        )
+        .run(now, update.eventId, update.orderId);
+      return changed.changes;
+    });
+    return transaction();
+  }
+
+  public getStaleUnresolvedAttempts(eventId: string, timeoutSeconds: number): string[] {
+    const threshold = new Date(Date.now() - timeoutSeconds * 1000).toISOString();
+    const rows = this.database
+      .prepare(
+        `SELECT attempt_id FROM execution_attempts
+         WHERE event_id = ?
+           AND state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying')
+           AND updated_at < ?`,
+      )
+      .all(eventId, threshold) as Array<{ attempt_id: string }>;
+    return rows.map((row) => row.attempt_id);
+  }
+
+  public getAllStaleUnresolvedAttempts(timeoutSeconds: number): string[] {
+    const threshold = new Date(Date.now() - timeoutSeconds * 1000).toISOString();
+    const rows = this.database
+      .prepare(
+        `SELECT attempt_id FROM execution_attempts
+         WHERE state IN ('submitting', 'accepted', 'matched', 'mined', 'retrying')
+           AND updated_at < ?`,
+      )
+      .all(threshold) as Array<{ attempt_id: string }>;
+    return rows.map((row) => row.attempt_id);
+  }
+
+  public isKillSwitchArmed(): boolean {
+    const row = this.database
+      .prepare(`SELECT value FROM safety_state WHERE key = 'live_trading_kill_switch'`)
+      .get() as { value: string } | undefined;
+    return row?.value === "armed";
+  }
+
+  public armKillSwitch(reason: string): boolean {
+    const wasArmed = this.isKillSwitchArmed();
+    this.database
+      .prepare(
+        `INSERT INTO safety_state (key, value, reason, updated_at)
+         VALUES ('live_trading_kill_switch', 'armed', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = 'armed', reason = excluded.reason,
+           updated_at = excluded.updated_at`,
+      )
+      .run(reason, new Date().toISOString());
+    return !wasArmed;
+  }
+
+  public clearKillSwitch(reason: string): void {
+    this.database
+      .prepare(
+        `INSERT INTO safety_state (key, value, reason, updated_at)
+         VALUES ('live_trading_kill_switch', 'clear', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = 'clear', reason = excluded.reason,
+           updated_at = excluded.updated_at`,
+      )
+      .run(reason, new Date().toISOString());
+  }
+
+  public getKillSwitchStatus(): { armed: boolean; reason: string | null; updatedAt: string | null } {
+    const row = this.database
+      .prepare(`SELECT value, reason, updated_at FROM safety_state WHERE key = 'live_trading_kill_switch'`)
+      .get() as { value: string; reason: string; updated_at: string } | undefined;
+    return {
+      armed: row?.value === "armed",
+      reason: row?.reason ?? null,
+      updatedAt: row?.updated_at ?? null,
+    };
+  }
+
+  public wasAlertDeliveredSince(dedupeKey: string, sinceIso: string): boolean {
+    const row = this.database
+      .prepare(
+        `SELECT 1 AS present FROM alert_deliveries
+         WHERE dedupe_key = ? AND state = 'delivered' AND updated_at >= ? LIMIT 1`,
+      )
+      .get(dedupeKey, sinceIso) as { present: number } | undefined;
+    return row?.present === 1;
+  }
+
+  public beginAlertDelivery(input: {
+    deliveryId: string;
+    dedupeKey: string;
+    title: string;
+    message: string;
+    priority: number;
+  }): void {
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO alert_deliveries (
+           delivery_id, dedupe_key, title, message, priority, state, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'sending', ?, ?)`,
+      )
+      .run(input.deliveryId, input.dedupeKey, input.title, input.message, input.priority, now, now);
+  }
+
+  public finishAlertDelivery(
+    deliveryId: string,
+    result: { delivered: boolean; requestId?: string; receipt?: string; error?: string },
   ): void {
     this.database
       .prepare(
-        `UPDATE execution_attempts
-         SET state = 'succeeded', order_id = ?, response_json = ?, updated_at = ?
-         WHERE attempt_id = ? AND state = 'submitting'`,
+        `UPDATE alert_deliveries
+         SET state = ?, request_id = ?, receipt = ?, error = ?, updated_at = ?
+         WHERE delivery_id = ?`,
       )
-      .run(orderId, JSON.stringify(response), new Date().toISOString(), attemptId);
+      .run(
+        result.delivered ? "delivered" : "failed",
+        result.requestId ?? null,
+        result.receipt ?? null,
+        result.error ?? null,
+        new Date().toISOString(),
+        deliveryId,
+      );
+  }
+
+  public getLatestAlertDelivery(dedupeKey: string): {
+    state: string;
+    requestId: string | null;
+    receipt: string | null;
+  } | null {
+    const row = this.database
+      .prepare(
+        `SELECT state, request_id, receipt FROM alert_deliveries
+         WHERE dedupe_key = ? ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(dedupeKey) as { state: string; request_id: string | null; receipt: string | null } | undefined;
+    return row
+      ? { state: row.state, requestId: row.request_id, receipt: row.receipt }
+      : null;
   }
 
   public getOpenOrders(eventId: string): PendingOrder[] {

@@ -13,6 +13,9 @@ function trade(overrides: Partial<FollowerTrade> = {}): FollowerTrade {
     price: "0.4",
     traderSide: "TAKER",
     matchedAt: "2026-07-19T01:00:00Z",
+    status: "CONFIRMED",
+    orderIds: ["order-1"],
+    transactionHash: "0xtransaction",
     raw: {},
     ...overrides,
   };
@@ -45,6 +48,15 @@ describe("reconstructEventLedger", () => {
     const ledger = reconstructEventLedger([item, item], [makeAsset({ tokenId: "token-yes" })]);
     expect(ledger.sizes.get("token-yes")).toBe("10");
     expect(ledger.tradeCount).toBe(1);
+  });
+
+  it("does not apply FAILED trades to reconstructed positions", () => {
+    const ledger = reconstructEventLedger(
+      [trade({ status: "FAILED" })],
+      [makeAsset({ tokenId: "token-yes" })],
+    );
+    expect(ledger.sizes.get("token-yes") ?? "0").toBe("0");
+    expect(ledger.tradeCount).toBe(0);
   });
 
   it("detects disagreement with the public position snapshot", () => {

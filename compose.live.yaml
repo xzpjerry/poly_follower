@@ -1,0 +1,14 @@
+services:
+  follower:
+    environment:
+      PUSHOVER_APP_TOKEN_FILE: /run/secrets/pushover_app_token
+      PUSHOVER_USER_KEY_FILE: /run/secrets/pushover_user_key
+    secrets:
+      - pushover_app_token
+      - pushover_user_key
+
+secrets:
+  pushover_app_token:
+    file: "${CREDENTIALS_DIRECTORY}/pushover_app_token"
+  pushover_user_key:
+    file: "${CREDENTIALS_DIRECTORY}/pushover_user_key"

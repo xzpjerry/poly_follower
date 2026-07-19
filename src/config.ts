@@ -96,7 +96,27 @@ const configSchema = z
       max_slippage_bps: z.number().int().min(0).default(300),
       max_book_age_ms: z.number().int().min(100).default(2000),
       stop_before_end_seconds: z.number().int().min(0).default(120),
+      terminal_timeout_seconds: z.number().int().min(30).default(180),
     }),
+    alerts: z
+      .object({
+        pushover: z
+          .object({
+            enabled: z.boolean().default(false),
+            request_timeout_ms: z.number().int().min(1000).default(10_000),
+            emergency_retry_seconds: z.number().int().min(30).default(30),
+            emergency_expire_seconds: z.number().int().min(30).max(10_800).default(3600),
+            dedupe_seconds: z.number().int().min(0).default(300),
+          })
+          .default({ enabled: false }),
+      })
+      .default({}),
+    safety: z
+      .object({
+        kill_switch_path: z.string().min(1).default("data/LIVE_TRADING_DISABLED"),
+        user_stream_unhealthy_seconds: z.number().int().min(30).default(60),
+      })
+      .default({}),
     state: z.object({
       database_path: z.string().min(1),
     }),
@@ -175,6 +195,20 @@ export interface AppConfig {
     maxSlippageBps: number;
     maxBookAgeMs: number;
     stopBeforeEndSeconds: number;
+    terminalTimeoutSeconds: number;
+  };
+  alerts: {
+    pushover: {
+      enabled: boolean;
+      requestTimeoutMs: number;
+      emergencyRetrySeconds: number;
+      emergencyExpireSeconds: number;
+      dedupeSeconds: number;
+    };
+  };
+  safety: {
+    killSwitchPath: string;
+    userStreamUnhealthySeconds: number;
   };
   state: {
     databasePath: string;
@@ -226,6 +260,14 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   }
 
   if (parsed.execution.mode === "live") {
+    if (!parsed.alerts.pushover.enabled) {
+      throw new Error("Live execution requires alerts.pushover.enabled=true");
+    }
+    if (!process.env.PUSHOVER_APP_TOKEN_FILE?.trim() || !process.env.PUSHOVER_USER_KEY_FILE?.trim()) {
+      throw new Error(
+        "Live execution requires PUSHOVER_APP_TOKEN_FILE and PUSHOVER_USER_KEY_FILE",
+      );
+    }
     if (parsed.scope.event_slug) {
       const confirmedEvent = process.env.POLYMARKET_LIVE_TRADING_EVENT?.trim();
       if (confirmedEvent !== parsed.scope.event_slug) {
@@ -278,6 +320,24 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       maxSlippageBps: parsed.execution.max_slippage_bps,
       maxBookAgeMs: parsed.execution.max_book_age_ms,
       stopBeforeEndSeconds: parsed.execution.stop_before_end_seconds,
+      terminalTimeoutSeconds: parsed.execution.terminal_timeout_seconds,
+    },
+    alerts: {
+      pushover: {
+        enabled: parsed.alerts.pushover.enabled,
+        requestTimeoutMs: parsed.alerts.pushover.request_timeout_ms,
+        emergencyRetrySeconds: parsed.alerts.pushover.emergency_retry_seconds,
+        emergencyExpireSeconds: parsed.alerts.pushover.emergency_expire_seconds,
+        dedupeSeconds: parsed.alerts.pushover.dedupe_seconds,
+      },
+    },
+    safety: {
+      killSwitchPath: path.resolve(
+        path.dirname(absolutePath),
+        "..",
+        parsed.safety.kill_switch_path,
+      ),
+      userStreamUnhealthySeconds: parsed.safety.user_stream_unhealthy_seconds,
     },
     state: {
       databasePath: path.resolve(path.dirname(absolutePath), "..", parsed.state.database_path),

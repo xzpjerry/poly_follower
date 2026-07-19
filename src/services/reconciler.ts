@@ -9,10 +9,15 @@ import { buildReconciliationPlan } from "../domain/target-position.js";
 import { compareLedgerToPublicPositions, reconstructEventLedger } from "../domain/trade-ledger.js";
 import type { DiscoveredEvent, OrderBook, ReconciliationPlan, UserPosition } from "../domain/types.js";
 import { StateDatabase } from "../persistence/database.js";
-import { AuthenticatedClobClient } from "../polymarket/clob-authenticated-client.js";
-import { ClobPublicClient } from "../polymarket/clob-public-client.js";
-import { DataClient } from "../polymarket/data-client.js";
-import { GammaClient } from "../polymarket/gamma-client.js";
+import { NoopAlertNotifier, type AlertNotifier } from "./alerts.js";
+import type {
+  AuthenticatedClobPort,
+  ClobPublicPort,
+  DataPort,
+  GammaPort,
+  UserStreamHealthPort,
+} from "./ports.js";
+import { LiveSafetyController } from "./safety.js";
 
 function filterAllowedPositions(
   positions: UserPosition[],
@@ -46,12 +51,15 @@ function eventAllowsBuys(event: DiscoveredEvent, nowMs: number, stopBeforeEndSec
 export class Reconciler {
   public constructor(
     private readonly config: AppConfig,
-    private readonly gamma: GammaClient,
-    private readonly data: DataClient,
-    private readonly clob: ClobPublicClient,
+    private readonly gamma: GammaPort,
+    private readonly data: DataPort,
+    private readonly clob: ClobPublicPort,
     private readonly state: StateDatabase,
     private readonly logger: Logger,
-    private readonly authenticatedClob: AuthenticatedClobClient | null = null,
+    private readonly authenticatedClob: AuthenticatedClobPort | null = null,
+    private readonly safety: LiveSafetyController | null = null,
+    private readonly alerts: AlertNotifier = new NoopAlertNotifier(),
+    private readonly userStreamHealth: UserStreamHealthPort | null = null,
   ) {}
 
   public async discover(): Promise<DiscoveredEvent> {
@@ -99,6 +107,31 @@ export class Reconciler {
       ]);
       this.state.replaceOpenOrders(event.eventId, authenticatedOpenOrders);
       pendingOrders = authenticatedOpenOrders;
+      for (const trade of authenticatedTrades) {
+        const linkedAttempts = this.state.recordTradeLifecycle({
+          eventId: event.eventId,
+          tradeId: trade.tradeId,
+          status: trade.status,
+          orderIds: trade.orderIds,
+          transactionHash: trade.transactionHash,
+          source: "authenticated-poll",
+          raw: trade.raw,
+        });
+        if (linkedAttempts > 0 && trade.status === "CONFIRMED") {
+          await this.alerts.send({
+            dedupeKey: `trade-confirmed:${trade.tradeId}`,
+            title: "Polymarket order confirmed",
+            message: `Trade ${trade.tradeId} reached CONFIRMED for ${event.eventSlug}`,
+            priority: 0,
+          });
+        }
+        if (linkedAttempts > 0 && trade.status === "FAILED" && this.config.execution.mode === "live") {
+          await this.requireSafety().arm("authenticated trade reached FAILED", {
+            eventId: event.eventId,
+            tradeId: trade.tradeId,
+          });
+        }
+      }
       try {
         const ledger = reconstructEventLedger(authenticatedTrades, event.assets);
         const mismatches = compareLedgerToPublicPositions(
@@ -115,6 +148,12 @@ export class Reconciler {
             { eventId: event.eventId, mismatchCount: mismatches.length, mismatches },
             "Authenticated trade ledger disagrees with public follower positions; live execution is blocked",
           );
+          if (this.config.execution.mode === "live") {
+            await this.requireSafety().arm("authenticated ledger mismatch", {
+              eventId: event.eventId,
+              mismatchCount: mismatches.length,
+            });
+          }
         }
         this.logger.info(
           {
@@ -132,6 +171,11 @@ export class Reconciler {
           { eventId: event.eventId, error },
           "Authenticated trade ledger could not be reconstructed; live execution is blocked",
         );
+        if (this.config.execution.mode === "live") {
+          await this.requireSafety().arm("authenticated ledger reconstruction failed", {
+            eventId: event.eventId,
+          });
+        }
       }
     }
     const unconfirmedLeaderZeroTokens = this.state.observeLeaderPositions(
@@ -219,7 +263,25 @@ export class Reconciler {
         this.logger.error({ runId: plan.runId }, "Live order blocked by unhealthy authenticated ledger");
         return plan;
       }
-      if (this.state.hasUnresolvedExecutionAttempt(event.eventId)) {
+      if (!this.userStreamHealth?.isHealthy()) {
+        this.logger.error(
+          { runId: plan.runId, eventId: event.eventId },
+          "Live order blocked until the User WebSocket is healthy",
+        );
+        return plan;
+      }
+      await this.requireSafety().assertCanTrade();
+      const staleAttempts = this.state.getAllStaleUnresolvedAttempts(
+        this.config.execution.terminalTimeoutSeconds,
+      );
+      if (staleAttempts.length > 0) {
+        await this.requireSafety().arm("execution terminal timeout", {
+          eventId: event.eventId,
+          attemptIds: staleAttempts,
+        });
+        return plan;
+      }
+      if (this.state.hasAnyUnresolvedExecutionAttempt()) {
         this.logger.error(
           { runId: plan.runId, eventId: event.eventId },
           "Live order blocked by an unresolved prior execution attempt",
@@ -254,7 +316,13 @@ export class Reconciler {
         });
         try {
           const receipt = await this.authenticatedClob.executeFok(decision, asset);
-          this.state.completeExecutionAttempt(attemptId, receipt.orderId, { ...receipt });
+          this.state.acceptExecutionAttempt(attemptId, receipt.orderId, { ...receipt }, receipt.tradeIds);
+          await this.alerts.send({
+            dedupeKey: `order-accepted:${receipt.orderId}`,
+            title: "Polymarket order accepted",
+            message: `${decision.action} ${new Decimal(decision.deltaSize).abs().toFixed()} shares accepted for ${event.eventSlug}; awaiting terminal status`,
+            priority: 0,
+          });
           this.logger.info(
             {
               runId: plan.runId,
@@ -264,9 +332,14 @@ export class Reconciler {
               tradeIds: receipt.tradeIds,
               transactionHashes: receipt.transactionHashes,
             },
-            "Guarded FOK order completed; the next cycle will reconcile before any further order",
+            "Guarded FOK order accepted; terminal confirmation is still required",
           );
         } catch (error) {
+          await this.requireSafety().arm("live order result unresolved", {
+            eventId: event.eventId,
+            attemptId,
+            tokenId: decision.tokenId,
+          });
           this.logger.fatal(
             { runId: plan.runId, attemptId, tokenId: decision.tokenId, error },
             "Live order result is unresolved; execution is now fail-closed",
@@ -276,5 +349,12 @@ export class Reconciler {
       }
     }
     return plan;
+  }
+
+  private requireSafety(): LiveSafetyController {
+    if (!this.safety) {
+      throw new Error("Live mode requires a safety controller");
+    }
+    return this.safety;
   }
 }

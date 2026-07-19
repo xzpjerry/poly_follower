@@ -51,6 +51,9 @@ export function reconstructEventLedger(
   const sortedTrades = [...trades].sort(compareMatchedAt);
 
   for (const trade of sortedTrades) {
+    if (trade.status === "FAILED") {
+      continue;
+    }
     if (seenTradeIds.has(trade.tradeId)) {
       continue;
     }

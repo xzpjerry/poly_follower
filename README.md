@@ -6,7 +6,7 @@ Event-scoped Polymarket weather copy-trading service. It discovers one exact Gam
 
 - `dry-run` remains the default.
 - `authenticated-readonly` verifies the signer/proxy relationship, derives or loads CLOB L2 credentials in memory, and reconciles authenticated open orders and trades without posting orders.
-- `live` is guarded by an exact Event or Series environment confirmation, authenticated ledger agreement, balance/allowance preflight, one FOK order per cycle, and fail-closed ambiguous-attempt recovery.
+- `live` is guarded by an exact Event or Series environment confirmation, authenticated ledger agreement, balance/allowance preflight, one FOK order per cycle, User WebSocket terminal tracking, authenticated polling recovery, Pushover alerts, and a persistent kill switch.
 - Runtime wallets and event slugs belong in ignored `config/runtime.yaml` or environment variables.
 - Private keys and CLOB credentials are accepted only through `*_FILE` paths. Never commit or inject their values as plaintext environment variables.
 
@@ -50,3 +50,23 @@ sudo systemd-run --wait --pipe --collect \
 ```
 
 The production unit template is `deploy/polymarket-weather-follower.service`. Do not install or enable it until the read-only probe passes and the runtime mode is deliberately selected.
+
+## Live safety controls
+
+Live mode requires `alerts.pushover.enabled: true` plus file-backed `PUSHOVER_APP_TOKEN_FILE` and `PUSHOVER_USER_KEY_FILE`. Emergency failures use priority 2 with retry/expiry, while startup, accepted orders, confirmations, and cancellations use lower priorities. Delivery attempts and emergency receipts are stored in SQLite without storing either credential.
+
+The kill switch is armed in both SQLite and `data/LIVE_TRADING_DISABLED`. Either source blocks every new live order. The fastest manual stop is safe even if the application cannot start:
+
+```bash
+touch data/LIVE_TRADING_DISABLED
+```
+
+The audited CLI can arm, inspect, or explicitly clear both sources. In the Ubuntu Docker environment:
+
+```bash
+docker compose run --rm --entrypoint node follower dist/src/kill-switch.js arm --config /app/config/runtime.yaml --reason "manual stop"
+docker compose run --rm --entrypoint node follower dist/src/kill-switch.js status --config /app/config/runtime.yaml
+docker compose run --rm --entrypoint node follower dist/src/kill-switch.js clear --confirm --config /app/config/runtime.yaml --reason "operator reviewed account state"
+```
+
+`--once` is intentionally rejected in live mode because an accepted order must remain under continuous User WebSocket and authenticated-poll monitoring until it reaches a terminal state.

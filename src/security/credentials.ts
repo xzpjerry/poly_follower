@@ -15,6 +15,11 @@ export interface TradingCredentials {
   clob: ClobApiCredentials | null;
 }
 
+export interface PushoverCredentials {
+  applicationToken: string;
+  userKey: string;
+}
+
 async function readRequiredSecretFile(environmentName: string): Promise<string> {
   const filePath = process.env[environmentName]?.trim();
   if (!filePath) {
@@ -61,4 +66,12 @@ export async function loadTradingCredentials(): Promise<TradingCredentials> {
     privateKey: privateKey.data as `0x${string}`,
     clob: key && secret && passphrase ? { key, secret, passphrase } : null,
   };
+}
+
+export async function loadPushoverCredentials(): Promise<PushoverCredentials> {
+  const [applicationToken, userKey] = await Promise.all([
+    readRequiredSecretFile("PUSHOVER_APP_TOKEN_FILE"),
+    readRequiredSecretFile("PUSHOVER_USER_KEY_FILE"),
+  ]);
+  return { applicationToken, userKey };
 }

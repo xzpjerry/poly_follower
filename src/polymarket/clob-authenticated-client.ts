@@ -36,6 +36,14 @@ const apiCredentialsSchema = z.object({
   secret: z.string().min(1),
   passphrase: z.string().min(1),
 });
+const authenticatedTradeSchema = z
+  .object({
+    status: z.enum(["MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"]),
+    taker_order_id: z.string().optional(),
+    maker_orders: z.array(z.object({ order_id: z.string() }).passthrough()).default([]),
+    transaction_hash: z.string().nullish(),
+  })
+  .passthrough();
 
 export interface AuthenticatedAccountStatus {
   signerAddress: string;
@@ -106,6 +114,7 @@ export class AuthenticatedClobClient {
     public readonly profileMappedProxyAddress: string,
     public readonly signatureType: SignatureTypeV2,
     public readonly credentialSource: "file" | "derived-in-memory",
+    private readonly apiCredentials: ApiKeyCreds,
   ) {}
 
   public static async connect(
@@ -165,9 +174,18 @@ export class AuthenticatedClobClient {
       profileMappedProxyAddress.toLowerCase(),
       signatureType,
       credentialSource,
+      apiCredentials,
     );
 
     return authenticated;
+  }
+
+  public getUserWebSocketAuth(): { key: string; secret: string; passphrase: string } {
+    return {
+      key: this.apiCredentials.key,
+      secret: this.apiCredentials.secret,
+      passphrase: this.apiCredentials.passphrase,
+    };
   }
 
   public async getAccountStatus(): Promise<AuthenticatedAccountStatus> {
@@ -239,6 +257,11 @@ export class AuthenticatedClobClient {
       if (side !== "BUY" && side !== "SELL") {
         throw new Error(`CLOB returned unsupported trade side for ${trade.id}`);
       }
+      const lifecycle = authenticatedTradeSchema.parse(trade);
+      const orderIds = [
+        ...(lifecycle.taker_order_id ? [lifecycle.taker_order_id] : []),
+        ...lifecycle.maker_orders.map((order) => order.order_id),
+      ];
       trades.push({
         tradeId: trade.id,
         tokenId: trade.asset_id,
@@ -247,6 +270,9 @@ export class AuthenticatedClobClient {
         price: trade.price,
         traderSide: trade.trader_side,
         matchedAt: trade.match_time_nano ?? trade.match_time,
+        status: lifecycle.status,
+        orderIds: [...new Set(orderIds)],
+        transactionHash: lifecycle.transaction_hash ?? null,
         raw: trade,
       });
     }

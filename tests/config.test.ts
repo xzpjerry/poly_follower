@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { loadConfig } from "../src/config.js";
 
@@ -45,6 +45,9 @@ execution:
   mode: "${mode}"
   signature_type: ${signatureType}
   max_orders_per_cycle: 1
+alerts:
+  pushover:
+    enabled: true
 state:
   database_path: "data/state.sqlite"
 `,
@@ -55,10 +58,23 @@ state:
 describe("live configuration gates", () => {
   const follower = "0x2222222222222222222222222222222222222222";
 
+  beforeEach(() => {
+    process.env.PUSHOVER_APP_TOKEN_FILE = "/run/secrets/pushover_app_token";
+    process.env.PUSHOVER_USER_KEY_FILE = "/run/secrets/pushover_user_key";
+  });
+
   it("requires an exact event-slug confirmation for live mode", async () => {
     delete process.env.POLYMARKET_LIVE_TRADING_EVENT;
     await expect(loadConfig(writeConfig("live", follower))).rejects.toThrow(
       "POLYMARKET_LIVE_TRADING_EVENT",
+    );
+  });
+
+  it("requires Pushover credential file paths in live mode", async () => {
+    process.env.POLYMARKET_LIVE_TRADING_EVENT = "event-slug";
+    delete process.env.PUSHOVER_USER_KEY_FILE;
+    await expect(loadConfig(writeConfig("live", follower))).rejects.toThrow(
+      "PUSHOVER_APP_TOKEN_FILE and PUSHOVER_USER_KEY_FILE",
     );
   });
 

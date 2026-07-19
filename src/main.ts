@@ -7,9 +7,12 @@ import { ClobPublicClient } from "./polymarket/clob-public-client.js";
 import { DataClient } from "./polymarket/data-client.js";
 import { GammaClient } from "./polymarket/gamma-client.js";
 import { JsonHttpClient } from "./polymarket/http-client.js";
-import { loadTradingCredentials } from "./security/credentials.js";
+import { loadPushoverCredentials, loadTradingCredentials } from "./security/credentials.js";
+import { NoopAlertNotifier, PushoverNotifier, type AlertNotifier } from "./services/alerts.js";
 import { Monitor } from "./services/monitor.js";
 import { Reconciler } from "./services/reconciler.js";
+import { LiveSafetyController } from "./services/safety.js";
+import { UserStream } from "./services/user-stream.js";
 
 const logger = pino({
   level: process.env.LOG_LEVEL ?? "info",
@@ -23,6 +26,8 @@ const logger = pino({
       "POLY_SIGNATURE",
       "POLY_API_KEY",
       "POLY_PASSPHRASE",
+      "applicationToken",
+      "userKey",
     ],
     censor: "[REDACTED]",
   },
@@ -37,6 +42,20 @@ const logger = pino({
 async function main(): Promise<void> {
   const cli = parseCliOptions(process.argv.slice(2));
   const config = await loadConfig(cli.configPath);
+  if (cli.once && config.execution.mode === "live") {
+    throw new Error("Live execution requires continuous monitoring; --once is not allowed");
+  }
+  const state = new StateDatabase(config.state.databasePath);
+  let alerts: AlertNotifier = new NoopAlertNotifier();
+  if (config.alerts.pushover.enabled) {
+    alerts = new PushoverNotifier(
+      await loadPushoverCredentials(),
+      config.alerts.pushover,
+      state,
+      logger,
+    );
+  }
+  const safety = new LiveSafetyController(state, config.safety.killSwitchPath, alerts, logger);
   let authenticatedClob: AuthenticatedClobClient | null = null;
   if (config.execution.mode !== "dry-run") {
     if (!config.followerProfileWallet) {
@@ -54,9 +73,17 @@ async function main(): Promise<void> {
     if (config.execution.mode === "live" && accountStatus.closedOnly) {
       throw new Error("CLOB account is in closed-only mode; live execution is disabled");
     }
+    if (config.execution.mode === "live") {
+      await safety.assertCanTrade();
+      await alerts.send({
+        dedupeKey: "live-service-started",
+        title: "Polymarket follower live",
+        message: "Live follower started; User WebSocket and authenticated polling are active",
+        priority: 1,
+      });
+    }
   }
 
-  const state = new StateDatabase(config.state.databasePath);
   const gammaHttp = new JsonHttpClient(
     "https://gamma-api.polymarket.com",
     config.monitoring.requestTimeoutMs,
@@ -71,7 +98,28 @@ async function main(): Promise<void> {
   const gamma = new GammaClient(gammaHttp);
   const data = new DataClient(dataHttp);
   const clob = new ClobPublicClient(clobHttp);
-  const reconciler = new Reconciler(config, gamma, data, clob, state, logger, authenticatedClob);
+  const userStream = authenticatedClob
+    ? new UserStream(
+        authenticatedClob.getUserWebSocketAuth(),
+        config,
+        state,
+        safety,
+        alerts,
+        logger,
+      )
+    : null;
+  const reconciler = new Reconciler(
+    config,
+    gamma,
+    data,
+    clob,
+    state,
+    logger,
+    authenticatedClob,
+    safety,
+    alerts,
+    userStream,
+  );
 
   try {
     if (cli.once) {
@@ -87,7 +135,7 @@ async function main(): Promise<void> {
     process.once("SIGINT", () => stop("SIGINT"));
     process.once("SIGTERM", () => stop("SIGTERM"));
 
-    const monitor = new Monitor(config, data, state, reconciler, logger);
+    const monitor = new Monitor(config, data, state, reconciler, logger, userStream);
     await monitor.run(abortController.signal);
   } finally {
     state.close();

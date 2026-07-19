@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { loadTradingCredentials } from "../src/security/credentials.js";
+import { loadPushoverCredentials, loadTradingCredentials } from "../src/security/credentials.js";
 
 const originalEnvironment = { ...process.env };
 const temporaryDirectories: string[] = [];
@@ -51,5 +51,17 @@ describe("loadTradingCredentials", () => {
     process.env.POLYMARKET_CLOB_API_KEY_FILE = secretFile("api-key", "key");
 
     await expect(loadTradingCredentials()).rejects.toThrow("complete key/secret/passphrase set");
+  });
+});
+
+describe("loadPushoverCredentials", () => {
+  it("loads Pushover secrets only from file paths", async () => {
+    process.env.PUSHOVER_APP_TOKEN_FILE = secretFile("pushover-app-token", "app-token");
+    process.env.PUSHOVER_USER_KEY_FILE = secretFile("pushover-user-key", "user-key");
+
+    await expect(loadPushoverCredentials()).resolves.toEqual({
+      applicationToken: "app-token",
+      userKey: "user-key",
+    });
   });
 });
